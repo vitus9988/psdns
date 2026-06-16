@@ -10,6 +10,9 @@
 /psdns
 /psdns-*
 
+# Release archives produced by scripts/build-release.sh
+/dist/
+
 # Test binaries built with `go test -c`
 *.test
 

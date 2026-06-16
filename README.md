@@ -18,6 +18,26 @@
 
 프록시 모드는 클라이언트↔서버 TCP를 종단 분리하므로, 업스트림으로 나가는 세그먼트 경계를 완전히 제어할 수 있습니다. 이름 해석도 프록시 내부에서 DoH로 처리하므로 DNS·SNI 차단을 한 번에 우회합니다.
 
+## 설치 (릴리즈 바이너리)
+
+빌드 없이 바로 쓰려면 [GitHub Releases](https://github.com/vitus9988/psdns/releases)에서 OS/아키텍처에 맞는 아카이브를 받아 **압축만 풀면 됩니다.** 의존성·런타임이 필요 없는 단일 정적 실행파일입니다.
+
+| OS | 아카이브 |
+|---|---|
+| Windows | `psdns_<버전>_windows_<amd64\|arm64>.zip` |
+| macOS | `psdns_<버전>_darwin_<amd64\|arm64>.tar.gz` |
+| Linux | `psdns_<버전>_linux_<amd64\|arm64>.tar.gz` |
+
+```sh
+# 예: macOS Apple Silicon
+tar -xzf psdns_v1.0.0_darwin_arm64.tar.gz
+cd psdns_v1.0.0_darwin_arm64
+./psdns version
+./psdns proxy
+```
+
+무결성 검증: `shasum -a 256 -c psdns_<버전>_checksums.txt` (Windows는 `CertUtil -hashfile <파일> SHA256`).
+
 ## 빌드
 
 Go 1.24 이상이 필요합니다.
@@ -88,16 +108,29 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 - 프록시 모드는 해당 프록시를 사용하도록 설정한 앱(브라우저 등)에만 적용됩니다.
 - VPN/우회 기술 자체는 한국에서 합법입니다. 본 도구는 차단 메커니즘의 이해·연구 목적으로 제공되며, **접근 대상 콘텐츠의 적법성과 관련 정책 준수 책임은 사용자에게 있습니다.**
 
+## 릴리즈 발행
+
+버전 태그를 push하면 GitHub Actions(`.github/workflows/release.yml`)가 6개 타깃(Windows/macOS/Linux × amd64/arm64)을 빌드·패키징해 Release로 자동 게시합니다.
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+로컬에서 동일한 아카이브를 만들려면: `scripts/build-release.sh [버전]` → `dist/`.
+
 ## 구조
 
 ```
-cmd/psdns         CLI 진입점 (resolve / proxy / run)
+cmd/psdns         CLI 진입점 (resolve / proxy / run / version)
 internal/config   런타임 설정
 internal/doh      DoH 클라이언트 (RFC 8484)
 internal/resolver host -> IP 해석 (TTL 캐시)
 internal/dnssrv   로컬 DNS 서버 (UDP/TCP -> DoH)
 internal/proxy    HTTP CONNECT + SOCKS5 프록시 + 릴레이
 internal/frag     ClientHello 파싱 및 분할 전략
+scripts/          크로스 빌드·패키징 스크립트
+.github/workflows 릴리즈 자동화 (태그 push)
 ```
 
 ## 라이선스

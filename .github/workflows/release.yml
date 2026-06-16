@@ -1,0 +1,40 @@
+name: release
+
+# Triggered by pushing a version tag, e.g.:
+#   git tag v1.0.0 && git push origin v1.0.0
+# Builds every target archive and publishes them as a GitHub Release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # required to create the release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so `git describe` works
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # stay in sync with the module's Go version
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build release archives
+        run: bash scripts/build-release.sh "${GITHUB_REF_NAME}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/psdns_*.tar.gz
+            dist/psdns_*.zip
+            dist/psdns_*_checksums.txt

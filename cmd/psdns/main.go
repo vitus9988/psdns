@@ -24,6 +24,10 @@ import (
 	"github.com/vitus9988/psdns/internal/resolver"
 )
 
+// version is the release version, injected at build time via
+// -ldflags "-X main.version=...". Defaults to "dev" for local builds.
+var version = "dev"
+
 func main() {
 	log.SetFlags(log.LstdFlags)
 	if len(os.Args) < 2 {
@@ -38,6 +42,8 @@ func main() {
 		runProxy(args)
 	case "run":
 		runAll(args)
+	case "version", "-v", "--version":
+		fmt.Printf("psdns %s\n", version)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -147,12 +153,13 @@ func onSignal(stop func()) {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `psdns - bypass DNS tampering (DoH) and SNI-based HTTPS blocking (ClientHello fragmentation)
+	fmt.Fprintf(os.Stderr, `psdns %s - bypass DNS tampering (DoH) and SNI-based HTTPS blocking (ClientHello fragmentation)
 
 usage:
   psdns resolve [flags]   run a local DoH resolver; set the OS DNS to its address
   psdns proxy   [flags]   run local HTTP CONNECT + SOCKS5 proxies; point the browser at them
   psdns run     [flags]   run the resolver and proxies together
+  psdns version           print the version and exit
 
 common flags:
   -doh URL          upstream DoH endpoint (default https://1.1.1.1/dns-query)
@@ -173,5 +180,5 @@ examples:
   psdns proxy                      # browser -> HTTP proxy 127.0.0.1:8080, DNS+SNI bypass
   psdns resolve -listen 127.0.0.1:5353
   psdns run -frag tls-record
-`)
+`, version)
 }
