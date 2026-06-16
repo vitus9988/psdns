@@ -1,0 +1,26 @@
+# Compiled binaries / shared objects
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# The psdns binary built via `go build ./cmd/psdns` (repo root only — does NOT
+# match the cmd/psdns/ source directory).
+/psdns
+/psdns-*
+
+# Test binaries built with `go test -c`
+*.test
+
+# Coverage / profiling output
+*.out
+coverage.*
+
+# Go workspace files
+go.work
+go.work.sum
+
+# OS / editor cruft
+.DS_Store
+*~
