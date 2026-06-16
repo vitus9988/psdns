@@ -46,11 +46,9 @@ cd psdns_v1.0.0_darwin_arm64
 
 ## 빌드
 
-Go 1.24 이상이 필요합니다.
+Go 1.24 이상이 필요합니다. 의존성은 `go.mod`/`go.sum` 에 고정돼 있어, 클론 후 빌드하면 Go 가 알아서 받습니다.
 
 ```sh
-go get github.com/miekg/dns # 의존성 받기 (go.sum 생성)
-go mod tidy
 go build ./cmd/psdns        # 현재 OS용 바이너리
 
 # 크로스 컴파일
