@@ -2,7 +2,12 @@ name: release
 
 # Triggered by pushing a version tag, e.g.:
 #   git tag v1.0.0 && git push origin v1.0.0
-# Builds every target archive and publishes them as a GitHub Release.
+#
+# The CLI (psdns) is CGO-free and cross-compiles anywhere, but the Wails GUI
+# (psdns-gui) needs a native build per OS, so each archive is produced on a
+# matching runner. Every archive bundles both binaries; the two ARM targets ship
+# CLI-only for now (no standard Wails build path). A final job collects all
+# archives, writes one checksums file, and publishes the release.
 on:
   push:
     tags:
@@ -11,9 +16,20 @@ on:
 permissions:
   contents: write # required to create the release and upload assets
 
+env:
+  WAILS_VERSION: v2.12.0
+
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build-gui:
+    name: build ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: macos,   os: macos-latest,   gui: darwin/universal, targets: darwin/amd64 darwin/arm64 }
+          - { label: windows, os: windows-latest, gui: windows/amd64,    targets: windows/amd64 }
+          - { label: linux,   os: ubuntu-latest,  gui: linux/amd64,      targets: linux/amd64 }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,14 +37,71 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod # stay in sync with the module's Go version
+          go-version-file: go.mod
           cache: true
 
-      - name: Run tests
-        run: go test ./...
+      - name: Install Linux WebKit dependencies
+        if: matrix.label == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
-      - name: Build release archives
-        run: bash scripts/build-release.sh "${GITHUB_REF_NAME}"
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      - name: Test (excluding GUI cgo packages)
+        shell: bash
+        run: go test $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+
+      - name: Build GUI + CLI and package
+        shell: bash
+        env:
+          SKIP_CHECKSUMS: '1' # the release job writes one combined checksums file
+        run: bash scripts/build-release.sh "${GITHUB_REF_NAME}" "${{ matrix.gui }}" ${{ matrix.targets }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.label }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  build-cli-arm:
+    name: build cli-only (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build CLI-only ARM archives
+        shell: bash
+        env:
+          SKIP_CHECKSUMS: '1'
+        run: bash scripts/build-release.sh "${GITHUB_REF_NAME}" none windows/arm64 linux/arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-arm
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  release:
+    needs: [build-gui, build-cli-arm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Generate combined checksums
+        run: |
+          cd dist
+          shasum -a 256 psdns_*.tar.gz psdns_*.zip > "psdns_${GITHUB_REF_NAME}_checksums.txt"
+          ls -1
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

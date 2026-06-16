@@ -13,6 +13,10 @@
 # Release archives produced by scripts/build-release.sh
 /dist/
 
+# Wails GUI build output and generated JS bindings (wails build regenerates them)
+/cmd/psdns-gui/build/bin/
+/cmd/psdns-gui/frontend/wailsjs/
+
 # Test binaries built with `go test -c`
 *.test
 

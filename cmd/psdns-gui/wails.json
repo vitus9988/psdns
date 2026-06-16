@@ -1,0 +1,17 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "psdns",
+  "outputfilename": "psdns-gui",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dir": "frontend",
+  "wailsjsdir": "./frontend",
+  "author": {
+    "name": "MinSeong Kim"
+  },
+  "info": {
+    "companyName": "psdns",
+    "productName": "psdns",
+    "comments": "개인용 DNS/SNI 차단 우회 데스크톱 앱"
+  }
+}

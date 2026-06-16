@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>psdns</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- ① App bar -->
+    <header class="appbar">
+      <div class="appbar__title">psdns</div>
+      <button id="updateDot" class="appbar__dot" type="button" hidden aria-label="새 버전 알림">
+        <span class="dot"></span>
+      </button>
+    </header>
+
+    <main class="content">
+      <!-- Update banner (hidden until an update is available) -->
+      <section id="updateBanner" class="banner" role="status" hidden>
+        <div class="banner__icon" aria-hidden="true">✦</div>
+        <div class="banner__text">
+          <div class="banner__title">새 버전이 나왔어요</div>
+          <div id="updateBannerSub" class="banner__sub"></div>
+        </div>
+        <button id="updateBtn" class="btn btn--primary btn--sm" type="button">업데이트</button>
+      </section>
+
+      <!-- ② HERO status card -->
+      <section class="card hero">
+        <div class="hero__status">
+          <span id="statusBadge" class="badge badge--off">
+            <span class="badge__dot"></span><span id="statusBadgeText">꺼짐</span>
+          </span>
+        </div>
+        <h1 id="heroTitle" class="hero__title">지금은 꺼져 있어요</h1>
+        <p id="heroSub" class="hero__sub">켜면 차단된 사이트에 다시 들어갈 수 있어요</p>
+        <button id="powerBtn" class="btn btn--primary btn--power" type="button">
+          <span class="btn__icon" aria-hidden="true">▶</span>
+          <span id="powerBtnText">보호 시작하기</span>
+        </button>
+        <p id="listenerErr" class="hero__error" hidden></p>
+      </section>
+
+      <!-- ③ Mode segment -->
+      <section class="card">
+        <div class="card__label">실행 방식</div>
+        <div id="modeSeg" class="segment" role="radiogroup" aria-label="실행 방식">
+          <button class="segment__btn is-active" role="radio" aria-checked="true" data-mode="proxy" type="button">
+            프록시<span class="segment__badge">권장</span>
+          </button>
+          <button class="segment__btn" role="radio" aria-checked="false" data-mode="resolve" type="button">시스템 DNS</button>
+          <button class="segment__btn" role="radio" aria-checked="false" data-mode="run" type="button">둘 다</button>
+        </div>
+        <p id="modeHint" class="hint">이 방법을 추천해요. 따로 권한이 필요 없어요</p>
+      </section>
+
+      <!-- ④ Bypass features -->
+      <section class="card">
+        <div class="card__label">차단 우회 기능</div>
+
+        <div class="row row--static">
+          <div class="row__text">
+            <div class="row__title">DNS 차단 우회 <span class="tag tag--on">항상 켜짐</span></div>
+            <div class="row__desc">차단된 주소도 막힘 없이 제대로 찾아가요</div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="row">
+          <div class="row__text">
+            <div class="row__title">사이트 주소 가리기 (HTTPS)</div>
+            <div class="row__desc">어떤 사이트에 들어가는지 통신사가 못 보게 가려 줘요</div>
+          </div>
+          <button id="sniToggle" class="switch" role="switch" aria-checked="true" type="button">
+            <span class="switch__knob"></span>
+          </button>
+        </div>
+        <div id="sniMethods" class="methods">
+          <button class="chip is-active" data-frag="split" type="button">
+            추천<span class="chip__sub">대부분 여기서 잘 돼요</span>
+          </button>
+          <button class="chip" data-frag="tls-record" type="button">
+            강력<span class="chip__sub">추천으로 안 되면</span>
+          </button>
+        </div>
+        <p id="sniNote" class="hint" hidden>이 방식은 '프록시'나 '둘 다' 모드에서만 작동해요</p>
+      </section>
+
+      <!-- ⑤ Connection address -->
+      <section id="connCard" class="card">
+        <div class="card__label">이 주소로 연결해 주세요</div>
+        <p class="card__sub">브라우저나 시스템 프록시에 아래 주소를 넣으면 돼요</p>
+        <div class="addr">
+          <span class="addr__tag">HTTP</span>
+          <span id="httpAddr" class="addr__value">127.0.0.1:8080</span>
+          <button class="btn btn--ghost btn--copy" data-copy="httpAddr" type="button">복사</button>
+        </div>
+        <div class="addr">
+          <span class="addr__tag">SOCKS5</span>
+          <span id="socksAddr" class="addr__value">127.0.0.1:1080</span>
+          <button class="btn btn--ghost btn--copy" data-copy="socksAddr" type="button">복사</button>
+        </div>
+        <div id="dnsHint" class="addr addr--note" hidden>
+          <span id="dnsHintText">컴퓨터의 DNS 서버를 127.0.0.1로 바꿔 주세요</span>
+        </div>
+        <details class="howto">
+          <summary>설정하는 법 보기</summary>
+          <p>크롬: 설정 → 시스템 → <b>컴퓨터 프록시 설정 열기</b> → 수동 프록시에 위 주소를 넣어요. 시스템 DNS는 바꾸지 않아도 돼요.</p>
+        </details>
+      </section>
+
+      <!-- ⑥ Advanced settings -->
+      <section class="card">
+        <details id="advanced" class="advanced">
+          <summary class="advanced__summary">고급 설정</summary>
+          <div class="field">
+            <label for="fDoh">DoH 주소</label>
+            <input id="fDoh" type="text" inputmode="url" placeholder="https://1.1.1.1/dns-query" />
+          </div>
+          <div class="field">
+            <label for="fBootstrap">부트스트랩 IP</label>
+            <input id="fBootstrap" type="text" placeholder="비워 두면 자동으로 처리해요" />
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="fFragDelay">조각 사이 지연</label>
+              <input id="fFragDelay" type="text" placeholder="0s (예: 10ms)" />
+            </div>
+            <div class="field">
+              <label for="fTimeout">응답 대기 시간</label>
+              <input id="fTimeout" type="text" placeholder="10s" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="fHttp">HTTP 프록시 주소</label>
+            <input id="fHttp" type="text" placeholder="127.0.0.1:8080" />
+          </div>
+          <div class="field">
+            <label for="fSocks">SOCKS5 프록시 주소</label>
+            <input id="fSocks" type="text" placeholder="127.0.0.1:1080" />
+          </div>
+          <div class="field">
+            <label for="fDns">DNS 주소</label>
+            <input id="fDns" type="text" placeholder="127.0.0.1:53" />
+          </div>
+          <p class="hint">잘 모르겠다면 그대로 두는 걸 추천해요</p>
+        </details>
+      </section>
+
+      <p id="warnBox" class="warnbox" hidden></p>
+
+      <!-- ⑦ Footer -->
+      <footer class="footer">
+        <span id="versionText" class="footer__version">버전 dev</span>
+        <button id="quitBtn" class="btn btn--text" type="button">앱 종료</button>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Quit confirm modal -->
+  <div id="quitModal" class="modal" hidden>
+    <div class="modal__overlay" data-close="quit"></div>
+    <div class="modal__sheet" role="dialog" aria-modal="true" aria-labelledby="quitModalTitle">
+      <h2 id="quitModalTitle" class="modal__title">psdns를 종료할까요?</h2>
+      <p class="modal__body">종료하면 보호가 꺼지고, 차단 우회도 멈춰요</p>
+      <div class="modal__actions">
+        <button id="quitConfirm" class="btn btn--danger" type="button">종료하기</button>
+        <button class="btn btn--soft" data-close="quit" type="button">계속 쓰기</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Update progress modal -->
+  <div id="updateModal" class="modal" hidden>
+    <div class="modal__overlay"></div>
+    <div class="modal__sheet" role="dialog" aria-modal="true" aria-labelledby="updateModalTitle">
+      <h2 id="updateModalTitle" class="modal__title">업데이트</h2>
+      <p id="updateModalBody" class="modal__body">새 버전을 받고 있어요…</p>
+      <div class="progress"><div id="updateProgress" class="progress__bar"></div></div>
+      <div class="modal__actions">
+        <a id="updateReleaseLink" class="btn btn--soft" href="#" target="_blank" rel="noopener" hidden>릴리즈 페이지 열기</a>
+        <button id="updateClose" class="btn btn--soft" type="button" hidden>닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

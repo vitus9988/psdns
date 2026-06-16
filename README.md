@@ -7,6 +7,8 @@
 
 순수 유저스페이스(일반 소켓 write)만 사용하므로 Windows / macOS / Linux에서 동일하게 동작하고, 관리자 권한도 필요 없습니다(시스템 DNS 모드 제외).
 
+**두 가지 형태로 제공됩니다.** 터미널용 CLI(`psdns`)와, 처음 쓰는 사람도 큰 버튼 하나로 켜고 끌 수 있는 데스크톱 GUI(`psdns-gui`)입니다. 두 실행파일은 같은 릴리즈 아카이브에 함께 들어 있습니다.
+
 > ⚠️ SNI 우회 효과는 통신사 DPI 구현에 따라 달라지며 **100% 보장되지 않습니다.** 일부 사이트/회선에서는 통하지 않을 수 있습니다.
 
 ## 동작 원리
@@ -20,13 +22,15 @@
 
 ## 설치 (릴리즈 바이너리)
 
-빌드 없이 바로 쓰려면 [GitHub Releases](https://github.com/vitus9988/psdns/releases)에서 OS/아키텍처에 맞는 아카이브를 받아 **압축만 풀면 됩니다.** 의존성·런타임이 필요 없는 단일 정적 실행파일입니다.
+빌드 없이 바로 쓰려면 [GitHub Releases](https://github.com/vitus9988/psdns/releases)에서 OS/아키텍처에 맞는 아카이브를 받아 **압축만 풀면 됩니다.** 각 아카이브에는 CLI(`psdns`)와 GUI(`psdns-gui`)가 함께 들어 있습니다. CLI는 의존성 없는 단일 정적 실행파일이고, GUI는 OS에 내장된 웹뷰(Windows = WebView2, macOS = WebKit, Linux = WebKitGTK)를 사용합니다.
 
-| OS | 아카이브 |
-|---|---|
-| Windows | `psdns_<버전>_windows_<amd64\|arm64>.zip` |
-| macOS | `psdns_<버전>_darwin_<amd64\|arm64>.tar.gz` |
-| Linux | `psdns_<버전>_linux_<amd64\|arm64>.tar.gz` |
+| OS | 아카이브 | GUI 포함 |
+|---|---|---|
+| Windows | `psdns_<버전>_windows_<amd64\|arm64>.zip` | amd64만 |
+| macOS | `psdns_<버전>_darwin_<amd64\|arm64>.tar.gz` | 둘 다 (universal) |
+| Linux | `psdns_<버전>_linux_<amd64\|arm64>.tar.gz` | amd64만 |
+
+> ARM(Windows/Linux arm64) 아카이브는 현재 CLI만 포함합니다.
 
 ```sh
 # 예: macOS Apple Silicon
@@ -35,6 +39,8 @@ cd psdns_v1.0.0_darwin_arm64
 ./psdns version
 ./psdns proxy
 ```
+
+**GUI로 쓰려면** 압축을 푼 뒤 `psdns-gui`(macOS는 `psdns.app`)를 실행하세요. 창이 열리면 **보호 시작하기** 버튼 하나로 켜고, 표시되는 프록시 주소를 복사해 브라우저에 넣으면 끝입니다. 새 버전이 나오면 앱이 알려 주고 버튼 하나로 업데이트합니다(아래 [자동 업데이트](#자동-업데이트) 참고).
 
 무결성 검증: `shasum -a 256 -c psdns_<버전>_checksums.txt` (Windows는 `CertUtil -hashfile <파일> SHA256`).
 
@@ -53,6 +59,18 @@ GOOS=darwin  GOARCH=arm64 go build -o psdns      ./cmd/psdns
 GOOS=linux   GOARCH=amd64 go build -o psdns      ./cmd/psdns
 ```
 
+### GUI 빌드 (선택)
+
+GUI(`psdns-gui`)는 [Wails](https://wails.io)로 빌드하며, CLI와 달리 **OS별 네이티브 툴체인(CGO)**이 필요해 크로스 컴파일은 불가합니다. [Wails 사전 요구사항](https://wails.io/docs/gettingstarted/installation)을 갖춘 뒤:
+
+```sh
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+cd cmd/psdns-gui && wails build      # build/bin/ 에 산출
+# Linux는 libgtk-3-dev, libwebkit2gtk-4.1-dev 설치 후 `wails build -tags webkit2_41`
+```
+
+프런트엔드는 빌드 단계가 없는 정적 HTML/CSS/JS라 Node가 필요 없습니다.
+
 ## 사용법
 
 ```
@@ -60,6 +78,8 @@ psdns resolve [flags]   로컬 DoH 리졸버 실행 (OS DNS를 이 주소로 지
 psdns proxy   [flags]   로컬 HTTP CONNECT + SOCKS5 프록시 실행 (브라우저를 이 주소로 지정)
 psdns run     [flags]   리졸버와 프록시를 동시에 실행
 ```
+
+> 터미널이 익숙하지 않다면 GUI(`psdns-gui`, macOS는 `psdns.app`)를 실행하세요. 아래 모든 기능(모드 선택·분할 전략·고급 설정)을 버튼과 토글로 제어하고, 프록시 주소 복사·자동 업데이트까지 한 화면에서 처리합니다.
 
 ### 권장: 프록시 모드 (자기완결적, 권한 불필요)
 
@@ -106,31 +126,41 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 
 - SNI fragmentation 효과는 통신사 DPI 구현에 의존하므로 **모든 사이트/회선에서 보장되지 않습니다.** 안 통하는 경우 ECH(대상 사이트가 지원할 때) 또는 Tor 등 풀터널 방식이 대안입니다.
 - 프록시 모드는 해당 프록시를 사용하도록 설정한 앱(브라우저 등)에만 적용됩니다.
+- GUI(`psdns-gui`)는 OS 내장 웹뷰를 사용합니다 — Windows는 WebView2(Win10+ 기본 탑재), macOS는 시스템 WebKit, Linux는 WebKitGTK(`libwebkit2gtk`) 런타임이 필요합니다. CLI(`psdns`)는 의존성 없는 단일 정적 바이너리입니다.
 - VPN/우회 기술 자체는 한국에서 합법입니다. 본 도구는 차단 메커니즘의 이해·연구 목적으로 제공되며, **접근 대상 콘텐츠의 적법성과 관련 정책 준수 책임은 사용자에게 있습니다.**
+
+## 자동 업데이트
+
+GUI(`psdns-gui`)는 시작할 때 [GitHub Releases](https://github.com/vitus9988/psdns/releases)에서 최신 버전을 확인하고, 새 버전이 있으면 배너로 알립니다. **업데이트** 버튼을 누르면 현재 OS/아키텍처 아카이브를 내려받아 published `checksums.txt`로 SHA-256 검증한 뒤, 실행 파일을 원자적으로 교체하고 재시작합니다(Windows의 실행 중 교체 포함). 검증에 실패하면 교체하지 않고 릴리즈 페이지 링크를 안내합니다. 개발 빌드(`dev`)나 정식 태그가 아닌 빌드는 자동 적용 대상에서 제외됩니다.
 
 ## 릴리즈 발행
 
-버전 태그를 push하면 GitHub Actions(`.github/workflows/release.yml`)가 6개 타깃(Windows/macOS/Linux × amd64/arm64)을 빌드·패키징해 Release로 자동 게시합니다.
+버전 태그를 push하면 GitHub Actions(`.github/workflows/release.yml`)가 **OS별 러너**에서 빌드해 6개 아카이브를 Release로 자동 게시합니다. mainstream 4개 타깃(macOS amd64·arm64, Windows amd64, Linux amd64)에는 CLI와 GUI가 함께, ARM 2개 타깃(Windows/Linux arm64)에는 CLI만 담깁니다. (CLI는 `CGO_ENABLED=0`으로 어디서나 크로스 컴파일되지만, Wails GUI는 OS별 네이티브 빌드가 필요해 매트릭스를 씁니다.)
 
 ```sh
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-로컬에서 동일한 아카이브를 만들려면: `scripts/build-release.sh [버전]` → `dist/`.
+로컬에서 만들려면 `scripts/build-release.sh [버전]` → `dist/`. CLI 6타깃은 항상 빌드되고, GUI는 (Wails CLI가 있으면) **빌드를 실행한 호스트 OS용 아카이브에만** 포함됩니다. 전체 플랫폼 GUI는 CI에서 생성됩니다.
 
 ## 구조
 
 ```
-cmd/psdns         CLI 진입점 (resolve / proxy / run / version)
-internal/config   런타임 설정
-internal/doh      DoH 클라이언트 (RFC 8484)
-internal/resolver host -> IP 해석 (TTL 캐시)
-internal/dnssrv   로컬 DNS 서버 (UDP/TCP -> DoH)
-internal/proxy    HTTP CONNECT + SOCKS5 프록시 + 릴레이
-internal/frag     ClientHello 파싱 및 분할 전략
-scripts/          크로스 빌드·패키징 스크립트
-.github/workflows 릴리즈 자동화 (태그 push)
+cmd/psdns           CLI 진입점 (resolve / proxy / run / version)
+cmd/psdns-gui       GUI 진입점 (Wails 데스크톱 앱 + 정적 프런트엔드)
+internal/config     런타임 설정
+internal/doh        DoH 클라이언트 (RFC 8484)
+internal/resolver   host -> IP 해석 (TTL 캐시)
+internal/dnssrv     로컬 DNS 서버 (UDP/TCP -> DoH)
+internal/proxy      HTTP CONNECT + SOCKS5 프록시 + 릴레이
+internal/frag       ClientHello 파싱 및 분할 전략
+internal/supervisor 서버 start/stop 오케스트레이션 (GUI가 구동)
+internal/gui        Wails 바인딩 (App 메서드, 프런트엔드가 호출)
+internal/uiconfig   GUI 설정 DTO ↔ config 변환·검증
+internal/selfupdate GitHub Releases 자동 업데이트 (확인·검증·교체)
+scripts/            크로스 빌드·패키징 스크립트
+.github/workflows   릴리즈 자동화 (태그 push, OS별 매트릭스)
 ```
 
 ## 라이선스
