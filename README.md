@@ -123,7 +123,7 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 
 ## 한계 및 고지
 
-- SNI fragmentation 효과는 통신사 DPI 구현에 의존하므로 **모든 사이트/회선에서 보장되지 않습니다.** 안 통하는 경우 ECH(대상 사이트가 지원할 때) 또는 Tor 등 풀터널 방식이 대안입니다.
+- SNI fragmentation 효과는 통신사 DPI 구현에 의존하므로 **모든 사이트/회선에서 보장되지 않습니다.** 안 통하는 경우 ECH(대상 사이트가 지원할 때) 또는 Tor 등 풀터널 방식이 대안입니다. 이 방식이 더 강하게 차단될 때 psdns가 철학(순수 유저스페이스·무설치·경량)을 지키며 추가로 적용할 수 있는 우회 전략 로드맵은 [`docs/bypass-roadmap.md`](docs/bypass-roadmap.md)에 정리돼 있습니다.
 - 프록시 모드는 해당 프록시를 사용하도록 설정한 앱(브라우저 등)에만 적용됩니다.
 - GUI(`psdns-gui`)는 OS 내장 웹뷰를 사용합니다 — Windows는 WebView2(Win10+ 기본 탑재), macOS는 시스템 WebKit, Linux는 WebKitGTK(`libwebkit2gtk`) 런타임이 필요합니다(Linux는 트레이 표시에 `libayatana-appindicator3`도 필요). CLI(`psdns`)는 의존성 없는 단일 정적 바이너리입니다.
 - VPN/우회 기술 자체는 한국에서 합법입니다. 본 도구는 차단 메커니즘의 이해·연구 목적으로 제공되며, **접근 대상 콘텐츠의 적법성과 관련 정책 준수 책임은 사용자에게 있습니다.**
@@ -160,6 +160,7 @@ internal/supervisor 서버 start/stop 오케스트레이션 (GUI가 구동)
 internal/gui        Wails 바인딩 (App 메서드·트레이/닫기 동작, 프런트엔드가 호출)
 internal/uiconfig   GUI 설정 DTO ↔ config 변환·검증
 internal/selfupdate GitHub Releases 자동 업데이트 (확인·검증·교체)
+docs/               설계 문서 (우회 전략 로드맵 등)
 scripts/            크로스 빌드·패키징 스크립트
 .github/workflows   릴리즈 자동화 (태그 push, OS별 매트릭스)
 ```
