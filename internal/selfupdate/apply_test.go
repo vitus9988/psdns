@@ -197,3 +197,68 @@ func TestFetchVerifiedBinaryCLIOverride(t *testing.T) {
 		t.Fatalf("extracted CLI binary mismatch: got %q", bin)
 	}
 }
+
+// TestExtractFromZipFindsNestedEntry covers the Windows (.zip) extraction path,
+// including base-name matching past a nested directory and a decoy file.
+func TestExtractFromZipFindsNestedEntry(t *testing.T) {
+	content := []byte("windows-exe-bytes")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range []struct {
+		name string
+		body []byte
+	}{
+		{"psdns_v1_windows_amd64/README.md", []byte("readme")},
+		{"psdns_v1_windows_amd64/psdns-gui.exe", content},
+	} {
+		w, _ := zw.Create(e.name)
+		_, _ = w.Write(e.body)
+	}
+	_ = zw.Close()
+
+	got, err := extractFromZip(buf.Bytes(), "psdns-gui.exe")
+	if err != nil {
+		t.Fatalf("extractFromZip: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("got %q, want %q", got, content)
+	}
+}
+
+func TestExtractFromZipNotFound(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create("pkg/other.txt")
+	_, _ = w.Write([]byte("x"))
+	_ = zw.Close()
+
+	if _, err := extractFromZip(buf.Bytes(), "psdns-gui.exe"); !errors.Is(err, ErrBinaryNotFound) {
+		t.Fatalf("want ErrBinaryNotFound, got %v", err)
+	}
+}
+
+// TestExtractBinaryDispatchesByExtension covers both branches of extractBinary:
+// a .zip asset routes to the zip reader, anything else to tar.gz.
+func TestExtractBinaryDispatchesByExtension(t *testing.T) {
+	content := []byte("payload-bytes")
+
+	var zbuf bytes.Buffer
+	zw := zip.NewWriter(&zbuf)
+	zf, _ := zw.Create("pkg/bin")
+	_, _ = zf.Write(content)
+	_ = zw.Close()
+	if got, err := extractBinary(zbuf.Bytes(), "psdns_v1_windows_amd64.zip", "bin"); err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("zip dispatch: got %q err %v", got, err)
+	}
+
+	var tbuf bytes.Buffer
+	gw := gzip.NewWriter(&tbuf)
+	tw := tar.NewWriter(gw)
+	_ = tw.WriteHeader(&tar.Header{Name: "pkg/bin", Mode: 0o755, Size: int64(len(content)), Typeflag: tar.TypeReg})
+	_, _ = tw.Write(content)
+	_ = tw.Close()
+	_ = gw.Close()
+	if got, err := extractBinary(tbuf.Bytes(), "psdns_v1_linux_amd64.tar.gz", "bin"); err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("tar.gz dispatch: got %q err %v", got, err)
+	}
+}
