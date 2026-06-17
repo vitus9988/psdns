@@ -40,7 +40,7 @@ cd psdns_v1.0.0_darwin_arm64
 ./psdns proxy
 ```
 
-**GUI로 쓰려면** 압축을 푼 뒤 `psdns-gui`(macOS는 `psdns.app`)를 실행하세요. 창이 열리면 **보호 시작하기** 버튼 하나로 켜고, 표시되는 프록시 주소를 복사해 브라우저에 넣으면 끝입니다. 새 버전이 나오면 앱이 알려 주고 버튼 하나로 업데이트합니다(아래 [자동 업데이트](#자동-업데이트) 참고).
+**GUI로 쓰려면** 압축을 푼 뒤 `psdns-gui`(macOS는 `psdns.app`)를 실행하세요. 창이 열리면 **보호 시작하기** 버튼 하나로 켜고, 표시되는 프록시 주소를 복사해 브라우저에 넣으면 끝입니다. 창의 닫기(X) 버튼을 누르면 앱이 종료되지 않고 트레이(macOS는 메뉴바) 아이콘으로 최소화되어 보호가 계속 동작합니다 — 완전히 끄려면 트레이 아이콘을 우클릭해 **종료하기**를 선택하세요(아이콘을 클릭하면 창이 다시 열립니다). 새 버전이 나오면 앱이 알려 주고 버튼 하나로 업데이트합니다(아래 [자동 업데이트](#자동-업데이트) 참고).
 
 무결성 검증: `shasum -a 256 -c psdns_<버전>_checksums.txt` (Windows는 `CertUtil -hashfile <파일> SHA256`).
 
@@ -64,7 +64,7 @@ GUI(`psdns-gui`)는 [Wails](https://wails.io)로 빌드하며, CLI와 달리 **O
 ```sh
 go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 cd cmd/psdns-gui && wails build      # build/bin/ 에 산출
-# Linux는 libgtk-3-dev, libwebkit2gtk-4.1-dev 설치 후 `wails build -tags webkit2_41`
+# Linux는 libgtk-3-dev, libwebkit2gtk-4.1-dev, libayatana-appindicator3-dev(트레이) 설치 후 `wails build -tags webkit2_41`
 ```
 
 프런트엔드는 빌드 단계가 없는 정적 HTML/CSS/JS라 Node가 필요 없습니다.
@@ -125,7 +125,7 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 
 - SNI fragmentation 효과는 통신사 DPI 구현에 의존하므로 **모든 사이트/회선에서 보장되지 않습니다.** 안 통하는 경우 ECH(대상 사이트가 지원할 때) 또는 Tor 등 풀터널 방식이 대안입니다.
 - 프록시 모드는 해당 프록시를 사용하도록 설정한 앱(브라우저 등)에만 적용됩니다.
-- GUI(`psdns-gui`)는 OS 내장 웹뷰를 사용합니다 — Windows는 WebView2(Win10+ 기본 탑재), macOS는 시스템 WebKit, Linux는 WebKitGTK(`libwebkit2gtk`) 런타임이 필요합니다. CLI(`psdns`)는 의존성 없는 단일 정적 바이너리입니다.
+- GUI(`psdns-gui`)는 OS 내장 웹뷰를 사용합니다 — Windows는 WebView2(Win10+ 기본 탑재), macOS는 시스템 WebKit, Linux는 WebKitGTK(`libwebkit2gtk`) 런타임이 필요합니다(Linux는 트레이 표시에 `libayatana-appindicator3`도 필요). CLI(`psdns`)는 의존성 없는 단일 정적 바이너리입니다.
 - VPN/우회 기술 자체는 한국에서 합법입니다. 본 도구는 차단 메커니즘의 이해·연구 목적으로 제공되며, **접근 대상 콘텐츠의 적법성과 관련 정책 준수 책임은 사용자에게 있습니다.**
 
 ## 자동 업데이트
@@ -157,7 +157,7 @@ internal/dnssrv     로컬 DNS 서버 (UDP/TCP -> DoH)
 internal/proxy      HTTP CONNECT + SOCKS5 프록시 + 릴레이
 internal/frag       ClientHello 파싱 및 분할 전략
 internal/supervisor 서버 start/stop 오케스트레이션 (GUI가 구동)
-internal/gui        Wails 바인딩 (App 메서드, 프런트엔드가 호출)
+internal/gui        Wails 바인딩 (App 메서드·트레이/닫기 동작, 프런트엔드가 호출)
 internal/uiconfig   GUI 설정 DTO ↔ config 변환·검증
 internal/selfupdate GitHub Releases 자동 업데이트 (확인·검증·교체)
 scripts/            크로스 빌드·패키징 스크립트

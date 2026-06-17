@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
@@ -30,6 +31,13 @@ type App struct {
 	version string
 	sup     *supervisor.Supervisor
 	updater *selfupdate.Checker
+
+	// quitting distinguishes a real quit (tray "종료하기" / the in-app button,
+	// which route through Quit) from the window's close button: BeforeClose
+	// hides the window unless a quit is already in flight.
+	quitting atomic.Bool
+	// trayEnd tears the tray icon down; set by startTray, called from Shutdown.
+	trayEnd func()
 }
 
 // NewApp builds the App. version is the GUI build version shown in the UI.
@@ -45,11 +53,26 @@ func NewApp(version string) *App {
 // context and starts a one-shot background update check.
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
+	a.startTray()
 	go a.backgroundCheck()
 }
 
-// Shutdown is wired to OnShutdown: tear down any running servers.
+// BeforeClose is wired to OnBeforeClose. Returning true cancels the close, so
+// the window's X button hides to the tray and the servers keep running. A real
+// quit (via Quit) sets quitting first, so this lets that one through.
+func (a *App) BeforeClose(ctx context.Context) (prevent bool) {
+	if a.quitting.Load() {
+		return false
+	}
+	wruntime.WindowHide(ctx)
+	return true
+}
+
+// Shutdown is wired to OnShutdown: tear down the tray and any running servers.
 func (a *App) Shutdown(ctx context.Context) {
+	if a.trayEnd != nil {
+		a.trayEnd()
+	}
 	if a.sup != nil {
 		_ = a.sup.Stop()
 	}
@@ -155,8 +178,10 @@ func (a *App) restart() {
 	a.Quit()
 }
 
-// Quit stops servers and closes the app.
+// Quit stops servers and closes the app. Setting quitting first tells
+// BeforeClose to allow the close instead of hiding to the tray.
 func (a *App) Quit() {
+	a.quitting.Store(true)
 	if a.sup != nil {
 		_ = a.sup.Stop()
 	}

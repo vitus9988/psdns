@@ -3,6 +3,7 @@ module github.com/vitus9988/psdns
 go 1.24.0
 
 require (
+	github.com/energye/systray v1.0.3
 	github.com/miekg/dns v1.1.72
 	github.com/minio/selfupdate v0.6.0
 	github.com/wailsapp/wails/v2 v2.12.0

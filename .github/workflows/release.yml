@@ -40,9 +40,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install Linux WebKit dependencies
+      - name: Install Linux WebKit + tray dependencies
         if: matrix.label == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
 
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}

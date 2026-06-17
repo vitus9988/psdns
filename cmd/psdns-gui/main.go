@@ -43,6 +43,7 @@ func main() {
 		AssetServer:      &assetserver.Options{Assets: assets},
 		OnStartup:        app.Startup,
 		OnShutdown:       app.Shutdown,
+		OnBeforeClose:    app.BeforeClose,
 		Bind:             []interface{}{app},
 		SingleInstanceLock: &options.SingleInstanceLock{
 			UniqueId:               "psdns-gui.vitus9988.github.io",
