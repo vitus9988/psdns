@@ -153,3 +153,40 @@ func TestExchangeTimeout(t *testing.T) {
 		t.Fatalf("timeout not enforced promptly: %v", elapsed)
 	}
 }
+
+// TestExchangeNon200 covers the non-200 status branch.
+func TestExchangeNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upstream sad", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c, err := doh.New(srv.URL+"/dns-query", "", 5*time.Second)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	if _, err := c.Exchange(context.Background(), q); err == nil {
+		t.Fatal("expected error on non-200 response")
+	}
+}
+
+// TestExchangeMalformedResponse covers the unpack-failure branch.
+func TestExchangeMalformedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write([]byte("not a dns message"))
+	}))
+	defer srv.Close()
+
+	c, err := doh.New(srv.URL+"/dns-query", "", 5*time.Second)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	if _, err := c.Exchange(context.Background(), q); err == nil {
+		t.Fatal("expected unpack error on malformed body")
+	}
+}
