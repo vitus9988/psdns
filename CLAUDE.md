@@ -13,7 +13,7 @@
 
 ## 작업 시 주의
 
-- `go.mod`/`go.sum` 의 버전(go 1.24.0, miekg/dns, 그리고 GUI용 wails/v2·minio/selfupdate·golang.org/x/mod·energye/systray)을 바꾸면 README §빌드 의 Go/Wails 버전 요구도 함께 맞춰야 한다. CI(`release.yml`)의 `WAILS_VERSION` 과 README·`go install ...wails@vX` 의 버전, 그리고 Linux apt 의존성(`libgtk-3-dev`·`libwebkit2gtk-4.1-dev`·트레이용 `libayatana-appindicator3-dev`)도 `release.yml`·README 사이에서 동기화한다.
+- `go.mod`/`go.sum` 의 버전(go 1.24.0, miekg/dns, 그리고 GUI용 wails/v2·minio/selfupdate·golang.org/x/mod·energye/systray)을 바꾸면 README §빌드 의 Go/Wails 버전 요구도 함께 맞춰야 한다. CI(`release.yml`)의 `WAILS_VERSION` 과 README·`go install ...wails@vX` 의 버전, 그리고 Linux apt 의존성(`libgtk-3-dev`·`libwebkit2gtk-4.1-dev`·트레이용 `libayatana-appindicator3-dev`)도 `release.yml`·README 사이에서 동기화한다. wails/v2 버전 3자(`WAILS_VERSION`·README `wails@vX`·`go.mod`)는 `release.yml` 의 `checks` 잡이 빌드 전에 자동 대조하므로 불일치하면 릴리즈가 실패한다(단 apt 의존성 동기화는 여전히 수동). 같은 `checks` 잡이 `gofmt`·`go vet`(GUI cgo 패키지 제외)도 돌린다.
 
 ## Git 브랜치 정책
 

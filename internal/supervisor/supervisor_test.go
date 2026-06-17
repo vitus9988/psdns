@@ -108,7 +108,7 @@ func TestBindErrorSurfaced(t *testing.T) {
 
 	c := config.Default()
 	c.ProxyListen = occupied.Addr().String() // already in use
-	c.SocksListen = "127.0.0.1:0"             // free
+	c.SocksListen = "127.0.0.1:0"            // free
 	sup := New(c)
 	if err := sup.Start(ModeProxy); err != nil {
 		t.Fatalf("Start: %v", err)

@@ -20,8 +20,42 @@ env:
   WAILS_VERSION: v2.12.0
 
 jobs:
+  checks:
+    name: version sync + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify Wails version is in sync (release.yml / README / go.mod)
+        shell: bash
+        run: |
+          set -euo pipefail
+          readme=$(grep -oE 'wails/v2/cmd/wails@v[0-9]+\.[0-9]+\.[0-9]+' README.md | head -1 | sed 's/.*@//')
+          gomod=$(grep -oE 'wailsapp/wails/v2 v[0-9]+\.[0-9]+\.[0-9]+' go.mod | head -1 | sed 's/.* v/v/')
+          echo "release.yml=${WAILS_VERSION}  README=${readme}  go.mod=${gomod}"
+          if [ "${WAILS_VERSION}" != "${readme}" ] || [ "${WAILS_VERSION}" != "${gomod}" ]; then
+            echo "::error::Wails version mismatch — sync WAILS_VERSION, README (wails@…), and go.mod so all three match."
+            exit 1
+          fi
+      - name: gofmt
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet (excluding GUI cgo packages)
+        shell: bash
+        run: go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+
   build-gui:
     name: build ${{ matrix.label }}
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
@@ -66,6 +100,7 @@ jobs:
 
   build-cli-arm:
     name: build cli-only (arm64)
+    needs: checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
