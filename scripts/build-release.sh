@@ -32,7 +32,7 @@ fi
 
 OUT="dist"
 PKG="github.com/vitus9988/psdns"
-CLI_LDFLAGS="-s -w -X main.version=${VERSION}"
+CLI_LDFLAGS="-s -w -X main.version=${VERSION} -X ${PKG}/internal/selfupdate.Version=${VERSION}"
 GUI_LDFLAGS="-s -w -X main.version=${VERSION} -X ${PKG}/internal/selfupdate.Version=${VERSION}"
 
 if [ "$GUI_PLATFORM" = host ]; then

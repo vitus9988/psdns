@@ -117,7 +117,10 @@ func (c *Checker) fetchVerifiedBinary(ctx context.Context, rel release, report f
 	}
 
 	report(StageExtract, 0.8)
-	binName := BinaryName
+	binName := c.Binary
+	if binName == "" {
+		binName = BinaryName
+	}
 	if runtime.GOOS == "windows" {
 		binName += ".exe"
 	}

@@ -19,15 +19,31 @@ func TestIsNewer(t *testing.T) {
 		{"v1.2.0", "v1.0.0", true},
 		{"v1.0.0", "v1.0.0", false},
 		{"v1.0.0", "v1.2.0", false},
-		{"1.2.0", "1.0.0", true},   // missing leading v is normalized
-		{"v1.2.0", "dev", false},   // dev current never updates
-		{"dev", "v1.0.0", false},   // garbage latest ignored
-		{"v1.2.0", "", false},      // empty current
+		{"1.2.0", "1.0.0", true}, // missing leading v is normalized
+		{"v1.2.0", "dev", false}, // dev current never updates
+		{"dev", "v1.0.0", false}, // garbage latest ignored
+		{"v1.2.0", "", false},    // empty current
 		{"v1.2.0-rc1", "v1.1.0", true},
 	}
 	for _, c := range cases {
 		if got := isNewer(c.latest, c.current); got != c.want {
 			t.Errorf("isNewer(%q,%q)=%v want %v", c.latest, c.current, got, c.want)
+		}
+	}
+}
+
+func TestIsReleaseVersion(t *testing.T) {
+	cases := map[string]bool{
+		"v1.0.0":     true,
+		"1.2.3":      true, // missing leading v is normalized
+		"v2.0.0-rc1": true,
+		"dev":        false,
+		"":           false,
+		"abc1234":    false, // git-describe SHA
+	}
+	for v, want := range cases {
+		if got := IsReleaseVersion(v); got != want {
+			t.Errorf("IsReleaseVersion(%q) = %v, want %v", v, got, want)
 		}
 	}
 }

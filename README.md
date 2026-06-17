@@ -75,6 +75,7 @@ cd cmd/psdns-gui && wails build      # build/bin/ 에 산출
 psdns resolve [flags]   로컬 DoH 리졸버 실행 (OS DNS를 이 주소로 지정)
 psdns proxy   [flags]   로컬 HTTP CONNECT + SOCKS5 프록시 실행 (브라우저를 이 주소로 지정)
 psdns run     [flags]   리졸버와 프록시를 동시에 실행
+psdns update  [flags]   최신 릴리즈를 받아 자신을 교체 (-check 는 새 버전 확인만)
 ```
 
 > 터미널이 익숙하지 않다면 GUI(`psdns-gui`, macOS는 `psdns.app`)를 실행하세요. 아래 모든 기능(모드 선택·분할 전략·고급 설정)을 버튼과 토글로 제어하고, 프록시 주소 복사·자동 업데이트까지 한 화면에서 처리합니다.
@@ -130,6 +131,8 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 ## 자동 업데이트
 
 GUI(`psdns-gui`)는 시작할 때 [GitHub Releases](https://github.com/vitus9988/psdns/releases)에서 최신 버전을 확인하고, 새 버전이 있으면 배너로 알립니다. **업데이트** 버튼을 누르면 현재 OS/아키텍처 아카이브를 내려받아 published `checksums.txt`로 SHA-256 검증한 뒤, 실행 파일을 원자적으로 교체하고 재시작합니다(Windows의 실행 중 교체 포함). 검증에 실패하면 교체하지 않고 릴리즈 페이지 링크를 안내합니다. 개발 빌드(`dev`)나 정식 태그가 아닌 빌드는 자동 적용 대상에서 제외됩니다.
+
+CLI(`psdns`)도 같은 검증 로직을 공유합니다. `psdns update`를 실행하면 현재 OS/아키텍처 아카이브를 내려받아 `checksums.txt`로 SHA-256 검증한 뒤 실행 파일을 교체합니다(`psdns update -check`는 새 버전 존재 여부만 확인하고 교체하지 않음). `proxy`·`run`으로 장시간 실행 중이면 시작 시 새 버전이 있을 때 로그로 한 줄 알려 주며(자동 적용은 하지 않음), 교체 후에는 프로세스를 다시 실행해야 새 버전이 적용됩니다. GUI와 동일하게 개발 빌드(`dev`)는 자동 업데이트 대상에서 제외됩니다.
 
 ## 릴리즈 발행
 

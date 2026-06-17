@@ -42,6 +42,8 @@ func main() {
 		runProxy(args)
 	case "run":
 		runAll(args)
+	case "update":
+		runUpdate(args)
 	case "version", "-v", "--version":
 		fmt.Printf("psdns %s\n", version)
 	case "-h", "--help", "help":
@@ -115,6 +117,7 @@ func runProxy(args []string) {
 	go func() { errCh <- sp.ListenAndServe() }()
 	go onSignal(func() { _ = hp.Close(); _ = sp.Close() })
 	log.Printf("psdns proxy: HTTP %s | SOCKS5 %s | frag=%s -> DoH %s", c.ProxyListen, c.SocksListen, c.Frag, c.DoHURL)
+	go notifyUpdate()
 	log.Fatal(<-errCh)
 }
 
@@ -139,6 +142,7 @@ func runAll(args []string) {
 	go func() { errCh <- sp.ListenAndServe() }()
 	go onSignal(func() { dsrv.Shutdown(); _ = hp.Close(); _ = sp.Close() })
 	log.Printf("psdns run: DNS %s | HTTP %s | SOCKS5 %s | frag=%s -> DoH %s", c.DNSListen, c.ProxyListen, c.SocksListen, c.Frag, c.DoHURL)
+	go notifyUpdate()
 	log.Fatal(<-errCh)
 }
 
@@ -159,6 +163,7 @@ usage:
   psdns resolve [flags]   run a local DoH resolver; set the OS DNS to its address
   psdns proxy   [flags]   run local HTTP CONNECT + SOCKS5 proxies; point the browser at them
   psdns run     [flags]   run the resolver and proxies together
+  psdns update  [flags]   download and install the newest release (-check: only look)
   psdns version           print the version and exit
 
 common flags:

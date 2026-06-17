@@ -69,6 +69,7 @@ type Checker struct {
 	HTTP    *http.Client
 	APIBase string        // defaults to https://api.github.com (overridable in tests)
 	TTL     time.Duration // cache lifetime; defaults to 10m
+	Binary  string        // base name to extract from the archive; "" uses BinaryName ("psdns-gui"). The CLI sets this to "psdns".
 
 	mu       sync.Mutex
 	cache    *CheckResult
@@ -179,6 +180,14 @@ func findAsset(rel release, name string) *asset {
 		}
 	}
 	return nil
+}
+
+// IsReleaseVersion reports whether v is a release build (valid semver) that can
+// participate in auto-update. Non-semver builds like "dev" or a git-describe SHA
+// return false. Callers use it to distinguish "already up to date" from "this
+// build is not eligible for auto-update".
+func IsReleaseVersion(v string) bool {
+	return semver.IsValid(normalizeSemver(v))
 }
 
 // isNewer reports whether latestTag is a strictly newer semver than currentVer.
