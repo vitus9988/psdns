@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,10 @@ import (
 const (
 	minTTL = 30 * time.Second
 	maxTTL = time.Hour
+
+	// maxCacheEntries bounds the resolver cache so a long-running process cannot
+	// grow it without limit. When full, expired entries are dropped first.
+	maxCacheEntries = 4096
 )
 
 type entry struct {
@@ -42,16 +47,20 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]net.IP, error) {
 		return []net.IP{ip}, nil
 	}
 
+	// DNS names are case-insensitive, so normalise the cache key; otherwise
+	// "Example.com" and "example.com" would be cached (and resolved) separately.
+	key := strings.ToLower(host)
+
 	now := time.Now()
 	r.mu.Lock()
-	if e, ok := r.cache[host]; ok && now.Before(e.expires) {
+	if e, ok := r.cache[key]; ok && now.Before(e.expires) {
 		ips := e.ips
 		r.mu.Unlock()
 		return ips, nil
 	}
 	r.mu.Unlock()
 
-	ips, ttl, err := r.lookup(ctx, host)
+	ips, ttl, err := r.lookup(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -60,9 +69,29 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]net.IP, error) {
 	}
 
 	r.mu.Lock()
-	r.cache[host] = entry{ips: ips, expires: now.Add(ttl)}
+	r.storeLocked(key, entry{ips: ips, expires: now.Add(ttl)}, now)
 	r.mu.Unlock()
 	return ips, nil
+}
+
+// storeLocked inserts e under key while enforcing maxCacheEntries. The caller
+// must hold r.mu. When the cache is full it evicts expired entries first; if
+// every entry is still live it drops arbitrary ones so the map stays bounded.
+func (r *Resolver) storeLocked(key string, e entry, now time.Time) {
+	if len(r.cache) >= maxCacheEntries {
+		for k, v := range r.cache {
+			if !now.Before(v.expires) {
+				delete(r.cache, k)
+			}
+		}
+		for k := range r.cache {
+			if len(r.cache) < maxCacheEntries {
+				break
+			}
+			delete(r.cache, k)
+		}
+	}
+	r.cache[key] = e
 }
 
 // lookup queries A and AAAA concurrently over DoH and merges the answers.

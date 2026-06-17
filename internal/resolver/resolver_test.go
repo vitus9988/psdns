@@ -228,3 +228,26 @@ func TestResolvePartialError(t *testing.T) {
 		t.Fatalf("expected A address despite empty AAAA, got %v", ips)
 	}
 }
+
+// TestResolveCacheKeyCaseInsensitive verifies names differing only in case share
+// a cache entry (DNS is case-insensitive): the second, differently-cased lookup
+// is served from cache without a new upstream request.
+func TestResolveCacheKeyCaseInsensitive(t *testing.T) {
+	c, reqCount := mockDoH(t, answer{a: []dnsRR{{ip: "1.2.3.4", ttl: 300}}})
+	r := resolver.New(c)
+
+	if _, err := r.Resolve(context.Background(), "Example.COM"); err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	first := atomic.LoadInt32(reqCount)
+	if first == 0 {
+		t.Fatalf("first lookup made no DoH request")
+	}
+
+	if _, err := r.Resolve(context.Background(), "example.com"); err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+	if got := atomic.LoadInt32(reqCount); got != first {
+		t.Fatalf("case-variant lookup hit upstream: requests %d -> %d (want cache hit)", first, got)
+	}
+}

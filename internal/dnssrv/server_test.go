@@ -95,3 +95,33 @@ func TestServerRoundTrip(t *testing.T) {
 		t.Fatalf("answer = %q, want %q", got, want)
 	}
 }
+
+// TestListenAndServeReleasesUDPOnTCPBindError verifies that a bind failure on one
+// protocol cleans up the socket already opened for the other instead of leaving
+// it orphaned. We occupy a TCP port, point the server at it, and confirm
+// ListenAndServe returns the bind error and the UDP port is free afterwards.
+func TestListenAndServeReleasesUDPOnTCPBindError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.Addr().String()
+
+	dohClient, err := doh.New("https://1.1.1.1/dns-query", "", time.Second)
+	if err != nil {
+		t.Fatalf("doh.New: %v", err)
+	}
+	srv := dnssrv.New(dohClient, addr, time.Second)
+
+	if err := srv.ListenAndServe(); err == nil {
+		srv.Shutdown()
+		t.Fatal("expected TCP bind error, got nil")
+	}
+	// The UDP socket bound first must have been closed when the TCP bind failed.
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		t.Fatalf("UDP port not released after TCP bind failure (orphaned): %v", err)
+	}
+	_ = pc.Close()
+}

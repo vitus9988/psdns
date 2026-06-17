@@ -69,6 +69,8 @@ func TestToConfigRejectsBadInputs(t *testing.T) {
 		{"bad timeout", func(u *Config) { u.Timeout = "later" }, "응답 대기 시간"},
 		{"bad listen", func(u *Config) { u.ProxyListen = "not-an-addr" }, "주소 형식"},
 		{"bad doh", func(u *Config) { u.DoHURL = "ftp://nope" }, "DoH 주소"},
+		{"bad bootstrap", func(u *Config) { u.DoHBootstrap = "not-an-ip" }, "부트스트랩"},
+		{"bootstrap hostname", func(u *Config) { u.DoHBootstrap = "example.com:853" }, "부트스트랩"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,5 +98,16 @@ func TestToConfigEmptyFragKeepsDefault(t *testing.T) {
 	}
 	if c.Frag != config.FragSplit {
 		t.Errorf("empty frag should keep default split, got %q", c.Frag)
+	}
+}
+
+func TestToConfigAcceptsValidBootstrap(t *testing.T) {
+	for _, bs := range []string{"1.1.1.1", "1.1.1.1:853", "2606:4700:4700::1111", "[2606:4700:4700::1111]:853"} {
+		u := FromConfig(config.Default())
+		u.DNSListen = "127.0.0.1:5353" // avoid the :53 warning noise
+		u.DoHBootstrap = bs
+		if _, _, err := u.ToConfig(); err != nil {
+			t.Fatalf("valid bootstrap %q rejected: %v", bs, err)
+		}
 	}
 }
