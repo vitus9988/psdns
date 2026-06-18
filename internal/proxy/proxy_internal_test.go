@@ -6,6 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log"
+	"net"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -129,6 +133,28 @@ func TestReadFirstRecordBodyEOF(t *testing.T) {
 	}
 	if !bytes.Equal(got, rec) {
 		t.Fatalf("partial bytes differ from what was sent")
+	}
+}
+
+func TestLogRelayErr(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	// The normal end of a relay (EOF / closed conn) must stay silent.
+	for _, err := range []error{nil, io.EOF, net.ErrClosed} {
+		buf.Reset()
+		logRelayErr("dir", err)
+		if buf.Len() != 0 {
+			t.Errorf("expected silence for %v, logged %q", err, buf.String())
+		}
+	}
+
+	// An unexpected error is surfaced.
+	buf.Reset()
+	logRelayErr("upstream->client", errors.New("boom"))
+	if !strings.Contains(buf.String(), "boom") {
+		t.Errorf("unexpected error not logged: %q", buf.String())
 	}
 }
 

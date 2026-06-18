@@ -6,7 +6,9 @@ package proxy
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -62,17 +64,32 @@ func relay(clientRead io.Reader, client, upstream net.Conn, cfg config.Config) {
 		_ = client.SetReadDeadline(time.Time{})
 		if len(data) > 0 {
 			if werr := frag.WriteFirst(upstream, data, cfg.Frag, cfg.FragDelay); werr != nil {
+				logRelayErr("clienthello", werr)
 				return
 			}
 		}
 		if rerr != nil {
 			return
 		}
-		_, _ = io.Copy(upstream, clientRead)
+		if _, err := io.Copy(upstream, clientRead); err != nil {
+			logRelayErr("client->upstream", err)
+		}
 	}()
 
-	_, _ = io.Copy(client, upstream)
+	if _, err := io.Copy(client, upstream); err != nil {
+		logRelayErr("upstream->client", err)
+	}
 	closeBoth()
+}
+
+// logRelayErr logs an unexpected relay error. Ending a relay closes both
+// connections, so EOF and use-of-closed-connection are the normal stop signals
+// and stay silent; anything else is surfaced to aid debugging.
+func logRelayErr(dir string, err error) {
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return
+	}
+	log.Printf("proxy: relay %s: %v", dir, err)
 }
 
 // readFirstRecord reads the first TLS record (5-byte header + body) from r so
