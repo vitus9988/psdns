@@ -66,6 +66,7 @@ func TestToConfigRejectsBadInputs(t *testing.T) {
 	}{
 		{"bad frag", func(u *Config) { u.Frag = "magic" }, "분할 방식"},
 		{"bad fragDelay", func(u *Config) { u.FragDelay = "soon" }, "조각 사이 지연"},
+		{"huge fragDelay", func(u *Config) { u.FragDelay = "1h" }, "조각 사이 지연"},
 		{"bad timeout", func(u *Config) { u.Timeout = "later" }, "응답 대기 시간"},
 		{"bad listen", func(u *Config) { u.ProxyListen = "not-an-addr" }, "주소 형식"},
 		{"bad doh", func(u *Config) { u.DoHURL = "ftp://nope" }, "DoH 주소"},

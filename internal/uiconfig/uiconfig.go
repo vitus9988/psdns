@@ -82,6 +82,9 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 		if err != nil {
 			return c, warns, fmt.Errorf("조각 사이 지연 형식이 올바르지 않아요: %q (예: 10ms)", u.FragDelay)
 		}
+		if d < 0 || d > config.MaxFragDelay {
+			return c, warns, fmt.Errorf("조각 사이 지연이 범위를 벗어났어요: %q (0 ~ %v)", u.FragDelay, config.MaxFragDelay)
+		}
 		c.FragDelay = d
 	}
 	if u.Timeout != "" {

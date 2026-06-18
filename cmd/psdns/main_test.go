@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"testing"
+	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
 	"github.com/vitus9988/psdns/internal/selfupdate"
@@ -11,10 +12,60 @@ import (
 func TestSetFragValid(t *testing.T) {
 	for _, s := range []string{"none", "split", "tls-record"} {
 		c := config.Default()
-		setFrag(&c, s)
+		if err := setFrag(&c, s); err != nil {
+			t.Errorf("setFrag(%q): unexpected error %v", s, err)
+		}
 		if string(c.Frag) != s {
 			t.Errorf("setFrag(%q): Frag = %q", s, c.Frag)
 		}
+	}
+}
+
+func TestSetFragInvalid(t *testing.T) {
+	c := config.Default()
+	before := c.Frag
+	if err := setFrag(&c, "bogus"); err == nil {
+		t.Fatal(`setFrag("bogus"): expected error, got nil`)
+	}
+	if c.Frag != before {
+		t.Errorf("setFrag rejected the value but mutated Frag to %q", c.Frag)
+	}
+}
+
+func TestFinalize(t *testing.T) {
+	// Valid strategy + delay applies the strategy and returns nil.
+	c := config.Default()
+	if err := finalize(&c, "tls-record"); err != nil {
+		t.Errorf("valid finalize: %v", err)
+	}
+	if c.Frag != config.FragTLSRecord {
+		t.Errorf("finalize did not apply frag: %q", c.Frag)
+	}
+	// A bad strategy is rejected.
+	c = config.Default()
+	if err := finalize(&c, "nope"); err == nil {
+		t.Error("finalize should reject an invalid -frag")
+	}
+	// An over-cap delay is rejected even with a valid strategy.
+	c = config.Default()
+	c.FragDelay = config.MaxFragDelay + time.Second
+	if err := finalize(&c, "split"); err == nil {
+		t.Error("finalize should reject an over-cap -frag-delay")
+	}
+}
+
+func TestCheckFragDelay(t *testing.T) {
+	if err := checkFragDelay(10 * time.Millisecond); err != nil {
+		t.Errorf("10ms should be allowed: %v", err)
+	}
+	if err := checkFragDelay(config.MaxFragDelay); err != nil {
+		t.Errorf("the cap itself should be allowed: %v", err)
+	}
+	if err := checkFragDelay(config.MaxFragDelay + time.Second); err == nil {
+		t.Error("delay over the cap should be rejected")
+	}
+	if err := checkFragDelay(-time.Millisecond); err == nil {
+		t.Error("negative delay should be rejected")
 	}
 }
 

@@ -21,6 +21,11 @@ const (
 	FragTLSRecord FragStrategy = "tls-record"
 )
 
+// MaxFragDelay caps the per-fragment delay. Real use is microseconds to a few
+// tens of milliseconds; a far larger value (e.g. "1h") is almost certainly a
+// mistake that would stall every connection, so callers reject it up front.
+const MaxFragDelay = 5 * time.Second
+
 // Config is the resolved runtime configuration.
 type Config struct {
 	DoHURL       string        // upstream DoH endpoint (RFC 8484)

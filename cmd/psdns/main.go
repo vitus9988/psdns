@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
 	"github.com/vitus9988/psdns/internal/dnssrv"
@@ -68,13 +69,33 @@ func bindCommon(fs *flag.FlagSet) (*config.Config, *string) {
 	return &c, &fragStr
 }
 
-func setFrag(c *config.Config, s string) {
+func setFrag(c *config.Config, s string) error {
 	switch config.FragStrategy(s) {
 	case config.FragNone, config.FragSplit, config.FragTLSRecord:
 		c.Frag = config.FragStrategy(s)
+		return nil
 	default:
-		log.Fatalf("invalid -frag %q (want none|split|tls-record)", s)
+		return fmt.Errorf("invalid -frag %q (want none|split|tls-record)", s)
 	}
+}
+
+// finalize validates the parsed common flags: the fragmentation strategy and
+// the inter-fragment delay bound.
+func finalize(c *config.Config, fragStr string) error {
+	if err := setFrag(c, fragStr); err != nil {
+		return err
+	}
+	return checkFragDelay(c.FragDelay)
+}
+
+// checkFragDelay rejects an out-of-range inter-fragment delay. Real values are
+// microseconds to tens of milliseconds; a huge value (e.g. "1h") is a mistake
+// that would stall every connection (see config.MaxFragDelay).
+func checkFragDelay(d time.Duration) error {
+	if d < 0 || d > config.MaxFragDelay {
+		return fmt.Errorf("invalid -frag-delay %v (want 0–%v)", d, config.MaxFragDelay)
+	}
+	return nil
 }
 
 func mustDoH(c *config.Config) *doh.Client {
@@ -90,7 +111,9 @@ func runResolve(args []string) {
 	c, fragStr := bindCommon(fs)
 	fs.StringVar(&c.DNSListen, "listen", c.DNSListen, "local DNS listen address")
 	_ = fs.Parse(args)
-	setFrag(c, *fragStr)
+	if err := finalize(c, *fragStr); err != nil {
+		log.Fatal(err)
+	}
 
 	srv := dnssrv.New(mustDoH(c), c.DNSListen, c.Timeout)
 	go onSignal(srv.Shutdown)
@@ -106,7 +129,9 @@ func runProxy(args []string) {
 	fs.StringVar(&c.ProxyListen, "http", c.ProxyListen, "HTTP CONNECT proxy listen address")
 	fs.StringVar(&c.SocksListen, "socks", c.SocksListen, "SOCKS5 proxy listen address")
 	_ = fs.Parse(args)
-	setFrag(c, *fragStr)
+	if err := finalize(c, *fragStr); err != nil {
+		log.Fatal(err)
+	}
 
 	res := resolver.New(mustDoH(c))
 	hp := proxy.NewHTTP(res, *c)
@@ -128,7 +153,9 @@ func runAll(args []string) {
 	fs.StringVar(&c.ProxyListen, "http", c.ProxyListen, "HTTP CONNECT proxy listen address")
 	fs.StringVar(&c.SocksListen, "socks", c.SocksListen, "SOCKS5 proxy listen address")
 	_ = fs.Parse(args)
-	setFrag(c, *fragStr)
+	if err := finalize(c, *fragStr); err != nil {
+		log.Fatal(err)
+	}
 
 	client := mustDoH(c)
 	res := resolver.New(client)
