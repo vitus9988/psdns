@@ -52,6 +52,9 @@ jobs:
       - name: go vet (excluding GUI cgo packages)
         shell: bash
         run: go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+      - name: go test (excluding GUI cgo packages)
+        shell: bash
+        run: go test $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
 
   build-gui:
     name: build ${{ matrix.label }}
@@ -131,6 +134,19 @@ jobs:
           path: dist
           pattern: dist-*
           merge-multiple: true
+
+      - name: Verify all 6 archives are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          # macOS 2 (darwin amd64+arm64) + windows amd64 1 + linux amd64 1 + arm 2 = 6
+          count=$(ls -1 psdns_*.tar.gz psdns_*.zip 2>/dev/null | wc -l | tr -d ' ')
+          echo "found ${count} archives:"; ls -1 psdns_*.tar.gz psdns_*.zip || true
+          if [ "${count}" != "6" ]; then
+            echo "::error::expected 6 archives, found ${count} — a build runner likely failed; refusing to publish a partial release."
+            exit 1
+          fi
 
       - name: Generate combined checksums
         run: |
