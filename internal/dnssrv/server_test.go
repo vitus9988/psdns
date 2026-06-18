@@ -28,11 +28,10 @@ func freeUDPPort(t *testing.T) string {
 	return addr
 }
 
-// TestServerRoundTrip starts the real UDP+TCP server, backs it with a mock DoH,
-// and performs a genuine UDP query end-to-end through ListenAndServe.
-func TestServerRoundTrip(t *testing.T) {
-	const want = "198.51.100.42"
-
+// newMockDoH stands up an httptest DoH server that answers every A query with
+// answerIP and returns a client pointed at it.
+func newMockDoH(t *testing.T, answerIP string) *doh.Client {
+	t.Helper()
 	dohSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 		q := new(dns.Msg)
@@ -44,55 +43,67 @@ func TestServerRoundTrip(t *testing.T) {
 		resp.SetReply(q)
 		resp.Answer = append(resp.Answer, &dns.A{
 			Hdr: dns.RR_Header{Name: q.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP(want),
+			A:   net.ParseIP(answerIP),
 		})
 		packed, _ := resp.Pack()
 		w.Header().Set("Content-Type", "application/dns-message")
 		_, _ = w.Write(packed)
 	}))
-	defer dohSrv.Close()
+	t.Cleanup(dohSrv.Close)
 
-	dohClient, err := doh.New(dohSrv.URL+"/dns-query", "", 5*time.Second)
+	c, err := doh.New(dohSrv.URL+"/dns-query", "", 5*time.Second)
 	if err != nil {
 		t.Fatalf("doh.New: %v", err)
 	}
+	return c
+}
+
+// TestServerRoundTrip starts the real UDP+TCP server, backs it with a mock DoH,
+// and performs genuine queries end-to-end over both transports through
+// ListenAndServe (RFC 1035 §4.2 requires the server answer on UDP and TCP).
+func TestServerRoundTrip(t *testing.T) {
+	const want = "198.51.100.42"
 
 	addr := freeUDPPort(t)
-	srv := dnssrv.New(dohClient, addr, 5*time.Second)
+	srv := dnssrv.New(newMockDoH(t, want), addr, 5*time.Second)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
 	t.Cleanup(srv.Shutdown)
 
-	q := new(dns.Msg)
-	q.SetQuestion("example.com.", dns.TypeA)
-	q.Id = 0xABCD
-	cl := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+	for _, proto := range []string{"udp", "tcp"} {
+		t.Run(proto, func(t *testing.T) {
+			q := new(dns.Msg)
+			q.SetQuestion("example.com.", dns.TypeA)
+			q.Id = 0xABCD
+			cl := &dns.Client{Net: proto, Timeout: 2 * time.Second}
 
-	// Poll until the listener is up and answering.
-	var resp *dns.Msg
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		r, _, err := cl.Exchange(q, addr)
-		if err == nil && r != nil {
-			resp = r
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if resp == nil {
-		t.Fatalf("no response from server at %s", addr)
-	}
-	if resp.Id != q.Id {
-		t.Fatalf("response Id = %#x, want %#x", resp.Id, q.Id)
-	}
-	var got string
-	for _, rr := range resp.Answer {
-		if a, ok := rr.(*dns.A); ok {
-			got = a.A.String()
-		}
-	}
-	if got != want {
-		t.Fatalf("answer = %q, want %q", got, want)
+			// Poll until the listener is up and answering.
+			var resp *dns.Msg
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				r, _, err := cl.Exchange(q, addr)
+				if err == nil && r != nil {
+					resp = r
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if resp == nil {
+				t.Fatalf("no response from %s server at %s", proto, addr)
+			}
+			if resp.Id != q.Id {
+				t.Fatalf("%s: response Id = %#x, want %#x", proto, resp.Id, q.Id)
+			}
+			var got string
+			for _, rr := range resp.Answer {
+				if a, ok := rr.(*dns.A); ok {
+					got = a.A.String()
+				}
+			}
+			if got != want {
+				t.Fatalf("%s: answer = %q, want %q", proto, got, want)
+			}
+		})
 	}
 }
 
