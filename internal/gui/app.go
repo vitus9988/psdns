@@ -36,7 +36,9 @@ type App struct {
 	// which route through Quit) from the window's close button: BeforeClose
 	// hides the window unless a quit is already in flight.
 	quitting atomic.Bool
-	// trayEnd tears the tray icon down; set by startTray, called from Shutdown.
+	// trayEnd tears the tray icon down on macOS/Linux (the external-loop end
+	// hook); set by startTray, consumed by stopTray. Nil on Windows, which runs
+	// systray.Run and tears down via systray.Quit instead.
 	trayEnd func()
 }
 
@@ -70,9 +72,7 @@ func (a *App) BeforeClose(ctx context.Context) (prevent bool) {
 
 // Shutdown is wired to OnShutdown: tear down the tray and any running servers.
 func (a *App) Shutdown(ctx context.Context) {
-	if a.trayEnd != nil {
-		a.trayEnd()
-	}
+	a.stopTray()
 	if a.sup != nil {
 		_ = a.sup.Stop()
 	}
