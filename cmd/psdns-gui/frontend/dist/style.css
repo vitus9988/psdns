@@ -184,6 +184,14 @@ body { min-height: 100vh; }
 .btn[disabled] { background: var(--surface-sunken); color: var(--text-disabled); cursor: not-allowed; }
 .btn[disabled]:active { transform: none; }
 
+/* Custom controls (segments / chips / switch) disabled while protection is on.
+   They are <button>s, so the disabled attribute already blocks interaction and
+   focus; this only supplies the muted look. WCAG exempts disabled controls from
+   the contrast rule, and .6 stays legible (was an inline .5). */
+.segment__btn[disabled], .chip[disabled], .switch[disabled] {
+  opacity: .6; cursor: default;
+}
+
 /* Power button "stop" state */
 .btn--power.is-on {
   background: var(--surface); color: var(--danger);
@@ -295,14 +303,17 @@ body { min-height: 100vh; }
   font-size: 15px; color: var(--text-strong);
   transition: border-color var(--dur) var(--ease);
 }
-.field input:focus { outline: none; border-color: var(--primary); }
+.field input:focus { border-color: var(--primary); }
+/* Keep the borderless look for pointer focus, but let the global :focus-visible
+   ring show for keyboard users (WCAG 2.4.7). */
+.field input:focus:not(:focus-visible) { outline: none; }
 .field input::placeholder { color: var(--text-disabled); }
 .field-row { display: flex; gap: var(--s3); }
 .field-row .field { flex: 1; }
 
 /* Warnings */
 .warnbox {
-  font-size: 13px; line-height: 1.5; color: var(--text);
+  font-size: 13px; line-height: 1.5; color: var(--text); white-space: pre-wrap;
   background: var(--primary-weak); border-radius: var(--r-field); padding: var(--s4);
 }
 

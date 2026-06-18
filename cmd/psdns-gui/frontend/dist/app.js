@@ -206,8 +206,10 @@
   }
 
   function setControlsEnabled(on) {
+    // These are <button>s, so the disabled attribute alone blocks interaction
+    // and focus; the muted look is supplied by CSS ([disabled] rules).
     document.querySelectorAll("#modeSeg .segment__btn, #sniToggle, #sniMethods .chip")
-      .forEach((el) => { el.toggleAttribute("disabled", !on); el.style.pointerEvents = on ? "" : "none"; el.style.opacity = on ? "" : ".5"; });
+      .forEach((el) => { el.toggleAttribute("disabled", !on); });
     document.querySelectorAll("#advanced input")
       .forEach((el) => { el.disabled = !on; });
   }
@@ -307,6 +309,19 @@
     }
   }
 
+  // stageLabel mirrors the CLI's stageLabel (cmd/psdns/main.go) so the modal
+  // shows what the updater is doing as update:progress events arrive.
+  function stageLabel(stage) {
+    switch (stage) {
+      case "download": return "내려받는 중";
+      case "verify": return "검증 중";
+      case "extract": return "압축 해제";
+      case "replace": return "교체 중";
+      case "done": return "완료";
+      default: return "준비 중";
+    }
+  }
+
   function openUpdateModal() {
     $("updateModalBody").textContent = "새 버전을 받고 있어요…";
     $("updateProgress").style.width = "10%";
@@ -372,7 +387,24 @@
     $("updateDot").addEventListener("click", () => $("updateBanner").scrollIntoView({ behavior: "smooth" }));
     $("updateClose").addEventListener("click", () => closeModal("updateModal"));
 
-    if (rt && rt.EventsOn) rt.EventsOn("update:available", showUpdate);
+    if (rt && rt.EventsOn) {
+      rt.EventsOn("update:available", showUpdate);
+      // Drive the progress bar from the updater's stages so it doesn't sit at
+      // the initial 10% for the whole download.
+      rt.EventsOn("update:progress", (p) => {
+        if (!p) return;
+        $("updateModalBody").textContent = stageLabel(p.stage);
+        $("updateProgress").style.width = Math.round((p.pct || 0) * 100) + "%";
+      });
+      // The app emits update:error if the post-update relaunch fails, so the
+      // modal doesn't sit on "곧 다시 시작돼요" forever.
+      rt.EventsOn("update:error", (msg) => {
+        $("updateModalBody").textContent =
+          String(msg || "업데이트 후 자동 재시작에 실패했어요. 앱을 직접 다시 실행해 주세요.");
+        $("updateProgress").style.width = "0%";
+        $("updateClose").hidden = false;
+      });
+    }
   }
 
   // ---- init ------------------------------------------------------------------
