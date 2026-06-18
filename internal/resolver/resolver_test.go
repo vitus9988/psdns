@@ -2,11 +2,13 @@ package resolver_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -226,6 +228,46 @@ func TestResolvePartialError(t *testing.T) {
 	}
 	if !ipStrings(ips)["1.2.3.4"] {
 		t.Fatalf("expected A address despite empty AAAA, got %v", ips)
+	}
+}
+
+// TestResolveDedupsConcurrent verifies that many concurrent misses for the same
+// host collapse into one upstream lookup (A+AAAA = 2 requests) via in-flight
+// de-duplication, instead of each goroutine firing its own pair.
+func TestResolveDedupsConcurrent(t *testing.T) {
+	const goroutines = 20
+	c, reqCount := mockDoH(t, answer{
+		a:     []dnsRR{{ip: "1.2.3.4", ttl: 300}},
+		aaaa:  []dnsRR{{ip: "2001:db8::1", ttl: 300}},
+		delay: 100 * time.Millisecond, // hold requests open so the calls overlap
+	})
+	r := resolver.New(c)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			ips, err := r.Resolve(context.Background(), "example.com")
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !ipStrings(ips)["1.2.3.4"] {
+				errs <- fmt.Errorf("missing A record: %v", ips)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent Resolve: %v", err)
+	}
+
+	// A single de-duplicated lookup issues exactly two upstream requests (A+AAAA).
+	if got := atomic.LoadInt32(reqCount); got != 2 {
+		t.Fatalf("concurrent lookups not de-duplicated: %d upstream requests, want 2", got)
 	}
 }
 

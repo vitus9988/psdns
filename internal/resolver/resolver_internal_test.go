@@ -26,6 +26,29 @@ func TestStoreLockedEvictsExpiredWhenFull(t *testing.T) {
 	}
 }
 
+// TestStoreLockedEvictsSoonestWhenAllLive verifies that when the cache is full
+// and every entry is still live, the entry closest to expiring is dropped first.
+func TestStoreLockedEvictsSoonestWhenAllLive(t *testing.T) {
+	r := &Resolver{cache: make(map[string]entry)}
+	now := time.Now()
+	r.cache["soonest"] = entry{expires: now.Add(time.Minute)}
+	for i := 0; i < maxCacheEntries-1; i++ {
+		r.cache[fmt.Sprintf("live-%d", i)] = entry{expires: now.Add(time.Hour)}
+	}
+
+	r.storeLocked("new.example.com", entry{expires: now.Add(time.Hour)}, now)
+
+	if len(r.cache) > maxCacheEntries {
+		t.Fatalf("cache exceeded cap: %d", len(r.cache))
+	}
+	if _, ok := r.cache["soonest"]; ok {
+		t.Fatal("soonest-to-expire entry should have been evicted first")
+	}
+	if _, ok := r.cache["new.example.com"]; !ok {
+		t.Fatal("new entry was not stored")
+	}
+}
+
 // TestStoreLockedBoundsSizeWhenAllLive verifies that even when every entry is
 // still live, the cache never grows past the cap.
 func TestStoreLockedBoundsSizeWhenAllLive(t *testing.T) {

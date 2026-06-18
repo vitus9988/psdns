@@ -34,11 +34,22 @@ type Resolver struct {
 	doh   *doh.Client
 	mu    sync.Mutex
 	cache map[string]entry
+	// inflight collapses concurrent misses for the same host into a single
+	// upstream lookup; late callers wait on the leader's result. Guarded by mu.
+	inflight map[string]*inflightCall
+}
+
+// inflightCall is one in-progress lookup shared by every caller that asked for
+// the same host while it was running.
+type inflightCall struct {
+	done chan struct{}
+	ips  []net.IP
+	err  error
 }
 
 // New returns a Resolver backed by the given DoH client.
 func New(c *doh.Client) *Resolver {
-	return &Resolver{doh: c, cache: make(map[string]entry)}
+	return &Resolver{doh: c, cache: make(map[string]entry), inflight: make(map[string]*inflightCall)}
 }
 
 // Resolve returns the IPs for host. An IP literal is returned unchanged.
@@ -58,20 +69,37 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]net.IP, error) {
 		r.mu.Unlock()
 		return ips, nil
 	}
+	// Join an in-flight lookup for the same host instead of firing a duplicate.
+	if call, ok := r.inflight[key]; ok {
+		r.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.ips, call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	// Become the leader: publish the in-flight call before releasing the lock so
+	// every later caller joins it.
+	call := &inflightCall{done: make(chan struct{})}
+	r.inflight[key] = call
 	r.mu.Unlock()
 
 	ips, ttl, err := r.lookup(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("no addresses for %s", host)
+	if err == nil && len(ips) == 0 {
+		err = fmt.Errorf("no addresses for %s", host)
 	}
 
 	r.mu.Lock()
-	r.storeLocked(key, entry{ips: ips, expires: now.Add(ttl)}, now)
+	if err == nil {
+		r.storeLocked(key, entry{ips: ips, expires: now.Add(ttl)}, now)
+	}
+	delete(r.inflight, key)
 	r.mu.Unlock()
-	return ips, nil
+
+	call.ips, call.err = ips, err
+	close(call.done)
+	return ips, err
 }
 
 // storeLocked inserts e under key while enforcing maxCacheEntries. The caller
@@ -84,11 +112,17 @@ func (r *Resolver) storeLocked(key string, e entry, now time.Time) {
 				delete(r.cache, k)
 			}
 		}
-		for k := range r.cache {
-			if len(r.cache) < maxCacheEntries {
-				break
+		// If every entry is still live, evict the soonest-to-expire ones (least
+		// useful to keep) until back under the cap.
+		for len(r.cache) >= maxCacheEntries {
+			soonKey, first := "", true
+			var soonExp time.Time
+			for k, v := range r.cache {
+				if first || v.expires.Before(soonExp) {
+					soonKey, soonExp, first = k, v.expires, false
+				}
 			}
-			delete(r.cache, k)
+			delete(r.cache, soonKey)
 		}
 	}
 	r.cache[key] = e
@@ -110,6 +144,7 @@ func (r *Resolver) lookup(ctx context.Context, host string) ([]net.IP, time.Dura
 		m := new(dns.Msg)
 		m.SetQuestion(fqdn, qtype)
 		m.RecursionDesired = true
+		m.SetEdns0(4096, false) // advertise a larger UDP buffer to the upstream
 		resp, err := r.doh.Exchange(ctx, m)
 
 		mu.Lock()
