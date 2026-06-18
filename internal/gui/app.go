@@ -21,9 +21,17 @@ import (
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// settleDelay is how long Start waits before reading status, so an immediate
-// bind failure (e.g. :53 without privilege) is reflected in the response.
-const settleDelay = 150 * time.Millisecond
+const (
+	// settleDelay is how long Start waits before reading status, so an immediate
+	// bind failure (e.g. :53 without privilege) is reflected in the response.
+	settleDelay = 150 * time.Millisecond
+	// restartDelay gives the freshly launched copy a moment to come up before
+	// this process quits after an update.
+	restartDelay = 400 * time.Millisecond
+	// updateCheckTimeout bounds both the silent startup update check and the
+	// manual "업데이트 확인" check.
+	updateCheckTimeout = 20 * time.Second
+)
 
 // App is the object bound to the Wails frontend.
 type App struct {
@@ -40,6 +48,9 @@ type App struct {
 	// hook); set by startTray, consumed by stopTray. Nil on Windows, which runs
 	// systray.Run and tears down via systray.Quit instead.
 	trayEnd func()
+	// bgCancel cancels the in-flight startup update check so Shutdown can stop
+	// it rather than let it run (and emit) against a torn-down context.
+	bgCancel context.CancelFunc
 }
 
 // NewApp builds the App. version is the GUI build version shown in the UI.
@@ -56,26 +67,42 @@ func NewApp(version string) *App {
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
 	a.startTray()
-	go a.backgroundCheck()
+	bgCtx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
+	a.bgCancel = cancel
+	go a.backgroundCheck(bgCtx)
 }
 
 // BeforeClose is wired to OnBeforeClose. Returning true cancels the close, so
 // the window's X button hides to the tray and the servers keep running. A real
 // quit (via Quit) sets quitting first, so this lets that one through.
 func (a *App) BeforeClose(ctx context.Context) (prevent bool) {
-	if a.quitting.Load() {
+	if !a.shouldPreventClose() {
 		return false
 	}
 	wruntime.WindowHide(ctx)
 	return true
 }
 
-// Shutdown is wired to OnShutdown: tear down the tray and any running servers.
+// shouldPreventClose reports whether a window-close should be intercepted
+// (hidden to the tray) rather than allowed to quit. It is the Wails-free core
+// of BeforeClose, kept separate so the decision can be unit-tested. A real quit
+// routes through Quit, which sets quitting first.
+func (a *App) shouldPreventClose() bool {
+	return !a.quitting.Load()
+}
+
+// Shutdown is wired to OnShutdown: stop the in-flight update check, tear down
+// the tray and any running servers, and drop the runtime context so a late
+// background goroutine cannot emit against it.
 func (a *App) Shutdown(ctx context.Context) {
+	if a.bgCancel != nil {
+		a.bgCancel()
+	}
 	a.stopTray()
 	if a.sup != nil {
 		_ = a.sup.Stop()
 	}
+	a.ctx = nil
 }
 
 // OnSecondInstance brings the existing window to the front when the user
@@ -88,12 +115,10 @@ func (a *App) OnSecondInstance(_ options.SecondInstanceData) {
 	wruntime.Show(a.ctx)
 }
 
-func (a *App) backgroundCheck() {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+func (a *App) backgroundCheck(ctx context.Context) {
 	res, err := a.updater.Check(ctx, false)
 	if err != nil || !res.Newer {
-		return // offline, rate-limited, or already up to date: stay quiet
+		return // offline, rate-limited, cancelled, or already up to date: stay quiet
 	}
 	if a.ctx != nil {
 		wruntime.EventsEmit(a.ctx, "update:available", res)
@@ -145,7 +170,7 @@ func (a *App) SetConfig(u uiconfig.Config) (uiconfig.SetResult, error) {
 
 // CheckUpdate forces a fresh update check (the manual "업데이트 확인" button).
 func (a *App) CheckUpdate() (selfupdate.CheckResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
 	defer cancel()
 	return a.updater.Check(ctx, true)
 }
@@ -167,14 +192,25 @@ func (a *App) ApplyUpdate() error {
 	return nil
 }
 
-// restart launches a fresh copy of the (now-updated) executable and quits.
+// restart launches a fresh copy of the (now-updated) executable and quits. If
+// the relaunch cannot be started, it keeps this process alive and tells the UI
+// instead of quitting into nothing — the replaced binary is already on disk, so
+// the user can run it manually.
 func (a *App) restart() {
-	if exe, err := os.Executable(); err == nil {
+	exe, err := os.Executable()
+	if err == nil {
 		cmd := exec.Command(exe, os.Args[1:]...)
 		cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
-		_ = cmd.Start()
+		err = cmd.Start()
 	}
-	time.Sleep(400 * time.Millisecond)
+	if err != nil {
+		if a.ctx != nil {
+			wruntime.EventsEmit(a.ctx, "update:error",
+				"업데이트는 적용됐지만 자동 재시작에 실패했어요. 앱을 직접 다시 실행해 주세요.")
+		}
+		return
+	}
+	time.Sleep(restartDelay)
 	a.Quit()
 }
 
