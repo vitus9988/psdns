@@ -43,7 +43,8 @@ cd psdns_v1.0.0_darwin_arm64
 **GUI로 쓰려면** 압축을 푼 뒤 `psdns-gui`(macOS는 `psdns.app`)를 실행하세요. 창이 열리면 **보호 시작하기** 버튼 하나로 켜고, 표시되는 프록시 주소를 복사해 브라우저에 넣으면 끝입니다. 창의 닫기(X) 버튼을 누르면 앱이 종료되지 않고 트레이(macOS는 메뉴바) 아이콘으로 최소화되어 보호가 계속 동작합니다 — 완전히 끄려면 트레이 아이콘을 우클릭해 **종료하기**를 선택하세요(아이콘을 클릭하면 창이 다시 열립니다). 새 버전이 나오면 앱이 알려 주고 버튼 하나로 업데이트합니다(아래 [자동 업데이트](#자동-업데이트) 참고).
 
 > **macOS에서 "확인할 수 없습니다" 경고가 뜨면** — 현재 릴리즈는 Apple 공증(notarization) 전이라 Gatekeeper가 실행을 막을 수 있습니다(*"Apple은 'psdns'에 … 악성 코드가 없음을 확인할 수 없습니다"*). 아래 중 하나로 한 번만 허용하면 됩니다:
-> - **터미널(권장)**: `xattr -dr com.apple.quarantine psdns.app` 실행 후 다시 열기 (CLI도 쓰면 `xattr -dr com.apple.quarantine psdns`)
+> - **`psdns gui` (가장 간단)**: 압축 푼 폴더에서 `./psdns gui` 를 실행하면 같은 폴더의 `psdns.app` 격리를 자동으로 벗기고 GUI를 띄웁니다. 이후에는 앱을 더블클릭해도 바로 열립니다. (터미널에서 실행하는 CLI는 Gatekeeper 검사를 받지 않으므로 격리된 상태에서도 동작합니다.)
+> - **터미널(수동)**: `xattr -dr com.apple.quarantine psdns.app` 실행 후 다시 열기 (CLI도 쓰면 `xattr -dr com.apple.quarantine psdns`)
 > - **Finder**: `psdns.app`을 우클릭 → **열기** → 다시 **열기**
 > - **시스템 설정**: 한 번 실행을 시도한 뒤 **개인정보 보호 및 보안** → **그래도 열기**
 >
@@ -85,6 +86,7 @@ psdns resolve [flags]   로컬 DoH 리졸버 실행 (OS DNS를 이 주소로 지
 psdns proxy   [flags]   로컬 HTTP CONNECT + SOCKS5 프록시 실행 (브라우저를 이 주소로 지정)
 psdns run     [flags]   리졸버와 프록시를 동시에 실행
 psdns update  [flags]   최신 릴리즈를 받아 자신을 교체 (-check 는 새 버전 확인만)
+psdns gui               (macOS) psdns.app 격리(quarantine) 해제 후 실행 — Gatekeeper 경고 회피
 ```
 
 > 터미널이 익숙하지 않다면 GUI(`psdns-gui`, macOS는 `psdns.app`)를 실행하세요. 아래 모든 기능(모드 선택·분할 전략·고급 설정)을 버튼과 토글로 제어하고, 프록시 주소 복사·자동 업데이트까지 한 화면에서 처리합니다.

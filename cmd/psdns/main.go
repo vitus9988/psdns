@@ -45,6 +45,8 @@ func main() {
 		runAll(args)
 	case "update":
 		runUpdate(args)
+	case "gui":
+		runGUI(args)
 	case "version", "-v", "--version":
 		fmt.Printf("psdns %s\n", version)
 	case "-h", "--help", "help":
@@ -191,6 +193,7 @@ usage:
   psdns proxy   [flags]   run local HTTP CONNECT + SOCKS5 proxies; point the browser at them
   psdns run     [flags]   run the resolver and proxies together
   psdns update  [flags]   download and install the newest release (-check: only look)
+  psdns gui               (macOS) clear psdns.app's quarantine flag and launch it
   psdns version           print the version and exit
 
 common flags:
