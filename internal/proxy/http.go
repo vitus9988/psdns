@@ -28,13 +28,22 @@ func NewHTTP(res *resolver.Resolver, cfg config.Config) *HTTPProxy {
 	return &HTTPProxy{res: res, cfg: cfg}
 }
 
-// ListenAndServe accepts connections until the listener is closed. It is safe
-// to call Close concurrently, including before the listener is bound.
+// ListenAndServe binds cfg.ProxyListen and serves until the listener is closed.
+// It is the CLI entry point and keeps strict single-port behavior (no fallback).
+// It is safe to call Close concurrently, including before the listener is bound.
 func (p *HTTPProxy) ListenAndServe() error {
 	ln, err := net.Listen("tcp", p.cfg.ProxyListen)
 	if err != nil {
 		return err
 	}
+	return p.Serve(ln)
+}
+
+// Serve accepts connections on ln until it is closed via Close. Serve adopts ln
+// (Close shuts it down) and is safe to call Close before or concurrently with
+// Serve. The GUI supervisor uses Serve directly so it can bind with port
+// fallback and report the actual bound address.
+func (p *HTTPProxy) Serve(ln net.Listener) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()

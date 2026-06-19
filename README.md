@@ -42,6 +42,16 @@ cd psdns_v1.0.0_darwin_arm64
 
 **GUI로 쓰려면** 압축을 푼 뒤 `psdns-gui`(macOS는 `psdns.app`)를 실행하세요. 창이 열리면 **보호 시작하기** 버튼 하나로 켜고, 표시되는 프록시 주소를 복사해 브라우저에 넣으면 끝입니다. 창의 닫기(X) 버튼을 누르면 앱이 종료되지 않고 트레이(macOS는 메뉴바) 아이콘으로 최소화되어 보호가 계속 동작합니다 — 완전히 끄려면 트레이 아이콘을 우클릭해 **종료하기**를 선택하세요(아이콘을 클릭하면 창이 다시 열립니다). 새 버전이 나오면 앱이 알려 주고 버튼 하나로 업데이트합니다(아래 [자동 업데이트](#자동-업데이트) 참고).
 
+> **macOS에서 "확인할 수 없습니다" 경고가 뜨면** — 현재 릴리즈는 Apple 공증(notarization) 전이라 Gatekeeper가 실행을 막을 수 있습니다(*"Apple은 'psdns'에 … 악성 코드가 없음을 확인할 수 없습니다"*). 아래 중 하나로 한 번만 허용하면 됩니다:
+> - **`psdns gui` (가장 간단)**: 압축 푼 폴더에서 `./psdns gui` 를 실행하면 같은 폴더의 `psdns.app` 격리를 자동으로 벗기고 GUI를 띄웁니다. 이후에는 앱을 더블클릭해도 바로 열립니다. (터미널에서 실행하는 CLI는 Gatekeeper 검사를 받지 않으므로 격리된 상태에서도 동작합니다.)
+> - **터미널(수동)**: `xattr -dr com.apple.quarantine psdns.app` 실행 후 다시 열기 (CLI도 쓰면 `xattr -dr com.apple.quarantine psdns`)
+> - **Finder**: `psdns.app`을 우클릭 → **열기** → 다시 **열기**
+> - **시스템 설정**: 한 번 실행을 시도한 뒤 **개인정보 보호 및 보안** → **그래도 열기**
+>
+> 정식 서명·공증이 적용된 빌드부터는 이 단계가 필요 없습니다.
+
+> **Windows에서 프록시가 안 켜질 때** — 기본 포트(8080·1080)를 다른 프로그램이 쓰고 있거나, Hyper-V·WSL2·Docker Desktop이 예약한 포트 범위(`netsh int ipv4 show excludedportrange protocol=tcp`로 확인)에 걸리면, psdns-gui가 **자동으로 다른 빈 포트를 골라** 켜고 창에 실제 주소를 표시합니다 — 그 주소를 복사해 쓰면 됩니다. 8080 자체를 꼭 써야 한다면 그 포트를 점유한 프로그램을 끄거나 위 예약 범위를 조정하세요.
+
 무결성 검증: `shasum -a 256 -c psdns_<버전>_checksums.txt` (Windows는 `CertUtil -hashfile <파일> SHA256`).
 
 ## 빌드
@@ -76,6 +86,7 @@ psdns resolve [flags]   로컬 DoH 리졸버 실행 (OS DNS를 이 주소로 지
 psdns proxy   [flags]   로컬 HTTP CONNECT + SOCKS5 프록시 실행 (브라우저를 이 주소로 지정)
 psdns run     [flags]   리졸버와 프록시를 동시에 실행
 psdns update  [flags]   최신 릴리즈를 받아 자신을 교체 (-check 는 새 버전 확인만)
+psdns gui               (macOS) psdns.app 격리(quarantine) 해제 후 실행 — Gatekeeper 경고 회피
 ```
 
 > 터미널이 익숙하지 않다면 GUI(`psdns-gui`, macOS는 `psdns.app`)를 실행하세요. 아래 모든 기능(모드 선택·분할 전략·고급 설정)을 버튼과 토글로 제어하고, 프록시 주소 복사·자동 업데이트까지 한 화면에서 처리합니다.
@@ -144,6 +155,37 @@ git push origin v1.0.0
 ```
 
 로컬에서 만들려면 `scripts/build-release.sh [버전]` → `dist/`. CLI 6타깃은 항상 빌드되고, GUI는 (Wails CLI가 있으면) **빌드를 실행한 호스트 OS용 아카이브에만** 포함됩니다. 전체 플랫폼 GUI는 CI에서 생성됩니다.
+
+### 테스트 채널 (프리릴리즈)
+
+서명·포트·패키징 같은 산출물 전용 문제는 실제 릴리즈에서만 드러나므로, 정식 배포 전에 **프리릴리즈로 실물을 검증**합니다.
+
+1. 수정사항을 `test` 브랜치에 push → `ci.yml`(gofmt·vet·test)이 돕니다.
+2. 프리릴리즈 태그를 push → `release.yml`이 6개 아카이브를 **프리릴리즈**로 게시합니다. 실제 Windows/macOS에서 받아 검증합니다.
+   ```sh
+   git tag v1.0.0-rc.1 && git push origin v1.0.0-rc.1
+   ```
+3. 통과하면 `test` → `main` 으로 PR·머지합니다.
+4. `main`에서 접미사 없는 정식 태그를 push → 정식 릴리즈됩니다.
+
+1–2단계(테스트 프리릴리즈)는 `scripts/release-test.sh`, 3–4단계(정식 릴리즈)는 `scripts/release-main.sh` 로 자동화돼 있습니다(둘 다 `--dry-run` 으로 계획만 확인 가능). `release-test.sh` 는 현재 변경을 `test` 에 커밋·push 한 뒤 다음 `vX.Y.Z-rc.N` 을 자동 증가시켜 태그하고, `release-main.sh` 는 `test` → `main` 병합·push 후 접미사를 뗀 정식 `vX.Y.Z` 를 태그합니다(버전 생략 시 가장 높은 `-rc` 태그에서 도출).
+
+`-`가 들어간 태그(`v1.0.0-rc.1`)는 자동으로 GitHub 프리릴리즈로 게시되며, `/releases/latest`가 프리릴리즈를 제외하므로(그리고 안정 빌드는 프리릴리즈로 자동 업데이트되지 않으므로) **기존 사용자에게 자동 배포되지 않습니다.** 접미사 없는 `vX.Y.Z`만 모든 사용자에게 자동 업데이트로 제안됩니다.
+
+### macOS 서명·공증 (선택)
+
+macOS `psdns.app`의 Gatekeeper 경고를 없애려면 Apple Developer Program(연 $99) 계정으로 Developer ID 서명·공증을 적용합니다. 다음 GitHub Secrets를 설정하면 릴리즈 워크플로가 자동으로 서명·공증·스테이플합니다(설정 전에는 미서명으로 빌드되어 릴리즈가 그대로 동작):
+
+| Secret | 설명 |
+|---|---|
+| `MACOS_CERT_P12_BASE64` | Developer ID Application 인증서(.p12)를 base64로 인코딩한 값 |
+| `MACOS_CERT_PASSWORD` | 위 .p12 내보내기 암호 |
+| `MACOS_SIGN_IDENTITY` | 서명 식별자, 예: `Developer ID Application: MinSeong Kim (TEAMID)` |
+| `MACOS_NOTARY_APPLE_ID` | 공증용 Apple ID 이메일 |
+| `MACOS_NOTARY_PASSWORD` | 공증용 앱 암호(app-specific password) |
+| `MACOS_NOTARY_TEAM_ID` | Apple Developer 팀 ID |
+
+서명만 하고 공증 자격증명(`MACOS_NOTARY_*`)이 없으면 서명까지만 적용됩니다(이 경우 Gatekeeper 경고는 남습니다). 번들 식별자는 `io.github.vitus9988.psdns`이며 `MACOS_BUNDLE_ID` 환경변수로 바꿀 수 있습니다.
 
 ## 구조
 

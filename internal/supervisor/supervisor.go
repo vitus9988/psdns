@@ -6,6 +6,7 @@
 package supervisor
 
 import (
+	"net"
 	"sync"
 	"time"
 
@@ -18,10 +19,11 @@ import (
 
 // Listener is the live status of one underlying server.
 type Listener struct {
-	Kind string `json:"kind"` // KindDNS | KindHTTP | KindSOCKS
-	Addr string `json:"addr"`
-	Up   bool   `json:"up"`
-	Err  string `json:"err,omitempty"` // friendly bind/serve error when Up is false
+	Kind     string `json:"kind"` // KindDNS | KindHTTP | KindSOCKS
+	Addr     string `json:"addr"` // actual bound address (may differ from config on fallback)
+	Up       bool   `json:"up"`
+	Err      string `json:"err,omitempty"`      // friendly bind/serve error when Up is false
+	Fallback bool   `json:"fallback,omitempty"` // bound to an alternate port (configured one was unusable)
 }
 
 // State is a point-in-time snapshot returned by Status.
@@ -83,7 +85,8 @@ func (s *Supervisor) Start(mode Mode) error {
 	res := resolver.New(client)
 
 	// start records a fresh listener and runs its blocking serve loop in a
-	// goroutine, capturing the bind/serve error when it returns.
+	// goroutine, capturing the bind/serve error when it returns. Used for the DNS
+	// server, which binds a fixed system port (:53) and so does not fall back.
 	start := func(kind, addr string, serve func() error) {
 		l := &Listener{Kind: kind, Addr: addr, Up: true}
 		s.listeners[kind] = l
@@ -98,12 +101,38 @@ func (s *Supervisor) Start(mode Mode) error {
 		}()
 	}
 
+	// startProxy binds a TCP proxy with automatic port fallback, records the
+	// actual bound address, then serves it. Binding is synchronous so the result
+	// (an Up listener with its real address, or a friendly error) is settled
+	// before Start returns; only the accept loop runs in a goroutine.
+	startProxy := func(kind, addr string, p interface{ Serve(net.Listener) error }) {
+		l := &Listener{Kind: kind, Addr: addr}
+		s.listeners[kind] = l
+		ln, err := listenTCPFallback(addr)
+		if err != nil {
+			l.Err = classifyBindErr(kind, addr, err)
+			return
+		}
+		l.Addr = ln.Addr().String()
+		l.Up = true
+		l.Fallback = fellBack(addr, l.Addr)
+		go func() {
+			serr := p.Serve(ln)
+			s.mu.Lock()
+			l.Up = false
+			if serr != nil && !s.stopping && !isClosed(serr) {
+				l.Err = classifyBindErr(kind, l.Addr, serr)
+			}
+			s.mu.Unlock()
+		}()
+	}
+
 	switch mode {
 	case ModeProxy:
 		s.http = proxy.NewHTTP(res, s.cfg)
 		s.sock = proxy.NewSOCKS(res, s.cfg)
-		start(KindHTTP, s.cfg.ProxyListen, s.http.ListenAndServe)
-		start(KindSOCKS, s.cfg.SocksListen, s.sock.ListenAndServe)
+		startProxy(KindHTTP, s.cfg.ProxyListen, s.http)
+		startProxy(KindSOCKS, s.cfg.SocksListen, s.sock)
 	case ModeResolve:
 		s.dns = dnssrv.New(client, s.cfg.DNSListen, s.cfg.Timeout)
 		start(KindDNS, s.cfg.DNSListen, s.dns.ListenAndServe)
@@ -112,8 +141,8 @@ func (s *Supervisor) Start(mode Mode) error {
 		s.http = proxy.NewHTTP(res, s.cfg)
 		s.sock = proxy.NewSOCKS(res, s.cfg)
 		start(KindDNS, s.cfg.DNSListen, s.dns.ListenAndServe)
-		start(KindHTTP, s.cfg.ProxyListen, s.http.ListenAndServe)
-		start(KindSOCKS, s.cfg.SocksListen, s.sock.ListenAndServe)
+		startProxy(KindHTTP, s.cfg.ProxyListen, s.http)
+		startProxy(KindSOCKS, s.cfg.SocksListen, s.sock)
 	}
 
 	s.mode = mode

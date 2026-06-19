@@ -60,10 +60,13 @@ func (a *App) startTray() {
 
 	// macOS/Linux: Wails owns the single native loop. systray.Run would call
 	// [NSApp run] a second time on macOS and conflict; the external-loop hooks
-	// install the status item without it.
+	// install the status item without it. On macOS that status item is an NSWindow
+	// that must be born on the main thread, but Wails runs OnStartup on a non-main
+	// goroutine — so startTrayItem hops start() onto the main queue there (see
+	// tray_darwin.go); other OSes call it inline (tray_other.go).
 	start, end := systray.RunWithExternalLoop(onReady, func() {})
 	a.trayEnd = end
-	start()
+	startTrayItem(start)
 }
 
 // stopTray tears the tray down on Shutdown, matching whichever path startTray

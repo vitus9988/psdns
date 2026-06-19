@@ -67,6 +67,16 @@ jobs:
           - { label: windows, os: windows-latest, gui: windows/amd64,    targets: windows/amd64 }
           - { label: linux,   os: ubuntu-latest,  gui: linux/amd64,      targets: linux/amd64 }
     runs-on: ${{ matrix.os }}
+    # Apple Developer ID signing/notarization (macOS). All empty unless the repo
+    # secrets are set; build-release.sh produces unsigned builds when they are, so
+    # the release keeps working before an Apple Developer account is in place.
+    env:
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+      MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+      MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,6 +97,24 @@ jobs:
       - name: Test (excluding GUI cgo packages)
         shell: bash
         run: go test $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+
+      - name: Import Apple Developer ID certificate
+        if: matrix.label == 'macos' && env.MACOS_SIGN_IDENTITY != ''
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PWD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN"
+          # Prepend the signing keychain to the search list so codesign finds the identity.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
 
       - name: Build GUI + CLI and package
         shell: bash
@@ -158,6 +186,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # Tags with a pre-release suffix (e.g. v1.2.3-rc.1) are published as a
+          # GitHub pre-release. /releases/latest excludes pre-releases, so the
+          # test channel is never auto-offered to stable users; a plain vX.Y.Z
+          # tag publishes a full release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/psdns_*.tar.gz
             dist/psdns_*.zip
