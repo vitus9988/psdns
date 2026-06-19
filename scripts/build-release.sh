@@ -35,6 +35,47 @@ PKG="github.com/vitus9988/psdns"
 CLI_LDFLAGS="-s -w -X main.version=${VERSION} -X ${PKG}/internal/selfupdate.Version=${VERSION}"
 GUI_LDFLAGS="-s -w -X main.version=${VERSION} -X ${PKG}/internal/selfupdate.Version=${VERSION}"
 
+# macOS Developer ID signing/notarization (optional). All of it is gated on
+# MACOS_SIGN_IDENTITY: when unset, builds are produced unsigned exactly as before
+# (so local builds and CI without secrets keep working). When set, the .app and
+# bundled CLI are codesigned; notarization+stapling additionally needs the
+# MACOS_NOTARY_* credentials. See README §릴리즈 발행 / release.yml for the env.
+MACOS_BUNDLE_ID="${MACOS_BUNDLE_ID:-io.github.vitus9988.psdns}"
+
+# Defined before the GUI build block below, which calls them (bash resolves
+# functions at call time, so the definitions must precede the first invocation).
+macos_signing_enabled() { [ "$(go env GOOS)" = darwin ] && [ -n "${MACOS_SIGN_IDENTITY:-}" ]; }
+
+macos_codesign() { # $1 = path to .app or binary
+  codesign --force --options runtime --timestamp --deep \
+    --sign "${MACOS_SIGN_IDENTITY}" "$1"
+  codesign --verify --strict --verbose=2 "$1"
+}
+
+# macos_sign_app signs, notarizes, and staples a .app bundle once, so every
+# archive that bundles it ships a notarized, offline-verifiable app. Notarization
+# is skipped (signed only) when MACOS_NOTARY_* credentials are absent.
+macos_sign_app() { # $1 = path to .app
+  local app="$1"
+  echo "  signing ${app} (Developer ID: ${MACOS_SIGN_IDENTITY})"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${MACOS_BUNDLE_ID}" "${app}/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${MACOS_BUNDLE_ID}" "${app}/Contents/Info.plist"
+  macos_codesign "${app}"
+  if [ -n "${MACOS_NOTARY_APPLE_ID:-}" ] && [ -n "${MACOS_NOTARY_PASSWORD:-}" ] && [ -n "${MACOS_NOTARY_TEAM_ID:-}" ]; then
+    echo "  notarizing ${app} …"
+    local zip="${app%.app}-notarize.zip"
+    /usr/bin/ditto -c -k --keepParent "${app}" "${zip}"
+    xcrun notarytool submit "${zip}" \
+      --apple-id "${MACOS_NOTARY_APPLE_ID}" \
+      --password "${MACOS_NOTARY_PASSWORD}" \
+      --team-id "${MACOS_NOTARY_TEAM_ID}" --wait
+    xcrun stapler staple "${app}"
+    rm -f "${zip}"
+  else
+    echo "  MACOS_NOTARY_* not set — signed but NOT notarized (Gatekeeper will still warn)."
+  fi
+}
+
 if [ "$GUI_PLATFORM" = host ]; then
   GUI_PLATFORM="$(go env GOOS)/$(go env GOARCH)"
 fi
@@ -60,6 +101,11 @@ if [ "$GUI_PLATFORM" != none ]; then
       windows) GUI_ARTIFACT="psdns-gui.exe" ;;
       *)       GUI_ARTIFACT="psdns-gui" ;;
     esac
+    # Sign+notarize+staple the .app once here so both darwin archives (amd64 and
+    # arm64, sharing the one universal bundle) carry the notarized result.
+    if macos_signing_enabled && [ "$GUI_OS" = darwin ]; then
+      macos_sign_app "cmd/psdns-gui/build/bin/${GUI_ARTIFACT}"
+    fi
   else
     echo "wails CLI not found — building CLI-only archives (set up Wails to include the GUI)."
   fi
@@ -100,6 +146,14 @@ for target in "${TARGETS[@]}"; do
   CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
     go build -trimpath -ldflags "$CLI_LDFLAGS" -o "${stage}/${bin}" ./cmd/psdns
   cp README.md LICENSE "$stage/"
+
+  # Developer ID-sign the bundled CLI on darwin targets (no-op unless signing is
+  # enabled). Bare Mach-O binaries can't be stapled, so the documented xattr
+  # fallback still applies to the CLI when run from Terminal.
+  if macos_signing_enabled && [ "$GOOS" = darwin ]; then
+    echo "    signing CLI ${bin}"
+    macos_codesign "${stage}/${bin}"
+  fi
 
   if bundles_gui "$GOOS" "$GOARCH"; then
     cp -R "cmd/psdns-gui/build/bin/${GUI_ARTIFACT}" "$stage/"

@@ -15,6 +15,12 @@
 
 - `go.mod`/`go.sum` 의 버전(go 1.24.0, miekg/dns, 그리고 GUI용 wails/v2·minio/selfupdate·golang.org/x/mod·energye/systray)을 바꾸면 README §빌드 의 Go/Wails 버전 요구도 함께 맞춰야 한다. CI(`release.yml`)의 `WAILS_VERSION` 과 README·`go install ...wails@vX` 의 버전, 그리고 Linux apt 의존성(`libgtk-3-dev`·`libwebkit2gtk-4.1-dev`·트레이용 `libayatana-appindicator3-dev`)도 `release.yml`·README 사이에서 동기화한다. wails/v2 버전 3자(`WAILS_VERSION`·README `wails@vX`·`go.mod`)는 `release.yml` 의 `checks` 잡이 빌드 전에 자동 대조하므로 불일치하면 릴리즈가 실패한다(단 apt 의존성 동기화는 여전히 수동). 같은 `checks` 잡이 `gofmt`·`go vet`(GUI cgo 패키지 제외)도 돌린다.
 
-## Git 브랜치 정책
+## Git 브랜치 정책 / 릴리즈 파이프라인
 
-- **모든 작업과 커밋은 `main` 브랜치에서 진행한다.** 별도의 기능(feature) 브랜치를 만들지 않고 항상 `main` 으로 통일한다. 기본 브랜치라 하더라도 새 브랜치를 파지 말고 `main` 에 직접 커밋한다.
+- **통합 작업은 `test` 브랜치에서 진행하고, `main` 은 검증된 릴리즈 상태만 유지한다.** 산출물 전용 버그(서명·포트 바인딩·패키징 등)는 `go test` 로 못 잡고 **실제 빌드·패키징된 릴리즈에서만** 드러나므로, 정식 배포 전에 프리릴리즈로 실물을 검증하는 채널을 둔다. 흐름:
+  1. 수정사항을 `test` 브랜치에 커밋·푸시한다. → `ci.yml`(gofmt·vet·test·README↔go.mod Wails 대조)이 PR/푸시에서 돈다.
+  2. `vX.Y.Z-rc.N` 태그(프리릴리즈)를 달아 푸시한다. → `release.yml` 이 6개 아카이브를 빌드해 **프리릴리즈**로 게시한다(`prerelease: contains(ref_name,'-')`). 실제 Windows/macOS 산출물을 받아 검증한다.
+  3. 통과하면 `test` → `main` 으로 **PR·머지**한다.
+  4. `main` 에서 `vX.Y.Z`(접미사 없는) 태그를 달아 **정식 릴리즈**한다.
+- **버전 규칙:** `-` 가 들어간 태그(`-rc.N`)는 프리릴리즈로 게시되며 자동 업데이트 대상에서 제외된다(`/releases/latest` 가 프리릴리즈를 빼고, `internal/selfupdate` 도 안정 빌드에 프리릴리즈를 제안하지 않음 — 이중 안전장치). 접미사 없는 `vX.Y.Z` 만 모든 사용자에게 자동 업데이트로 제안된다. **따라서 `-rc` 와 최종 태그를 헷갈리지 말 것.**
+- `main` 보호(PR 필수·`ci.yml` 통과 필수)는 GitHub 저장소 설정이라 코드로 강제되지 않는다 — 별도 수동 설정 권장.

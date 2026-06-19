@@ -53,9 +53,10 @@ type CheckResult struct {
 func (r CheckResult) CanApply() bool { return r.Newer && r.Available }
 
 type release struct {
-	TagName string  `json:"tag_name"`
-	HTMLURL string  `json:"html_url"`
-	Assets  []asset `json:"assets"`
+	TagName    string  `json:"tag_name"`
+	Prerelease bool    `json:"prerelease"` // GitHub prerelease flag; never auto-offered to a stable build
+	HTMLURL    string  `json:"html_url"`
+	Assets     []asset `json:"assets"`
 }
 
 type asset struct {
@@ -151,11 +152,22 @@ func buildResult(rel release) CheckResult {
 	return CheckResult{
 		Current:    Version,
 		Latest:     rel.TagName,
-		Newer:      isNewer(rel.TagName, Version),
+		Newer:      isNewer(rel.TagName, Version) && !skipPrerelease(rel, Version),
 		ReleaseURL: rel.HTMLURL,
 		AssetName:  name,
 		Available:  findAsset(rel, name) != nil,
 	}
+}
+
+// skipPrerelease reports whether rel must not be offered to the current build
+// because GitHub flagged it a prerelease and the current build is a stable
+// release. /releases/latest already excludes prereleases, so this is defense in
+// depth — it also covers a hand-flagged release or any future switch to listing
+// all releases. The tag-suffix case is handled separately in isNewer.
+func skipPrerelease(rel release, currentVer string) bool {
+	cur := normalizeSemver(currentVer)
+	currentStable := semver.IsValid(cur) && semver.Prerelease(cur) == ""
+	return rel.Prerelease && currentStable
 }
 
 // assetNameFor builds the archive name for a target, matching scripts/
@@ -198,6 +210,13 @@ func isNewer(latestTag, currentVer string) bool {
 	lv := normalizeSemver(latestTag)
 	cv := normalizeSemver(currentVer)
 	if !semver.IsValid(lv) || !semver.IsValid(cv) {
+		return false
+	}
+	// Defense in depth: a stable build is never auto-updated to a prerelease
+	// (e.g. v1.2.3-rc.1), so a test-channel release can't leak to stable users
+	// even if it were served by /releases. A tester running a prerelease still
+	// gets the final release — that path has cv prerelease and lv stable.
+	if semver.Prerelease(lv) != "" && semver.Prerelease(cv) == "" {
 		return false
 	}
 	return semver.Compare(lv, cv) > 0

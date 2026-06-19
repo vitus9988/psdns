@@ -97,9 +97,11 @@ func TestRestartUsesFreshInstances(t *testing.T) {
 	}
 }
 
-// TestBindErrorSurfaced occupies a port, then points the HTTP proxy at it so the
-// bind fails with EADDRINUSE; the error must land in Listeners[http].Err.
-func TestBindErrorSurfaced(t *testing.T) {
+// TestBindFallbackWhenOccupied occupies a port, then points the HTTP proxy at it
+// so the configured bind fails (EADDRINUSE). The GUI supervisor must fall back
+// to a different free port — reporting an Up listener flagged Fallback with a
+// bound address that differs from the occupied one — rather than failing.
+func TestBindFallbackWhenOccupied(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("pre-bind: %v", err)
@@ -115,17 +117,26 @@ func TestBindErrorSurfaced(t *testing.T) {
 	}
 	defer sup.Stop()
 
-	st := sup.WaitSettled(250 * time.Millisecond)
+	st := sup.WaitSettled(150 * time.Millisecond)
 	l, ok := findListener(st, KindHTTP)
 	if !ok {
 		t.Fatal("http listener missing")
 	}
-	if l.Up {
-		t.Fatal("http listener should be down after bind failure")
+	if !l.Up || l.Err != "" {
+		t.Fatalf("http listener should fall back and be up: up=%v err=%q", l.Up, l.Err)
 	}
-	if l.Err == "" {
-		t.Fatal("expected a friendly bind error message, got empty")
+	if l.Addr == occupied.Addr().String() {
+		t.Fatalf("expected fallback to a different port, still bound to occupied %s", l.Addr)
 	}
+	if !l.Fallback {
+		t.Fatalf("expected Fallback=true when the configured port was unusable, addr=%s", l.Addr)
+	}
+	// The fallback address must actually be accepting connections.
+	conn, err := net.DialTimeout("tcp", l.Addr, time.Second)
+	if err != nil {
+		t.Fatalf("dial fallback %s: %v", l.Addr, err)
+	}
+	_ = conn.Close()
 }
 
 func TestSetConfigRejectedWhileRunning(t *testing.T) {

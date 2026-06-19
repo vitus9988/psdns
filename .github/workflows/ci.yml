@@ -1,0 +1,57 @@
+name: ci
+
+# Pre-merge gate for the test-branch -> PR -> main pipeline. Runs the fast code
+# checks (gofmt / go vet / go test, GUI cgo packages excluded, mirroring the
+# release gate) plus a lightweight README<->go.mod Wails-version sync check, on
+# every PR into main and every push to the test branch.
+#
+# The full release gate (Wails 3-way version sync + per-OS GUI builds + the
+# 6-archive completeness check) still runs in release.yml at tag push. Runtime
+# artifact bugs (signing, port binding, packaging) are validated by downloading
+# the pre-release build, which is the whole point of the test channel — so they
+# are intentionally NOT rebuilt here.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [test]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: lint + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify Wails version is in sync (README / go.mod)
+        shell: bash
+        run: |
+          set -euo pipefail
+          readme=$(grep -oE 'wails/v2/cmd/wails@v[0-9]+\.[0-9]+\.[0-9]+' README.md | head -1 | sed 's/.*@//')
+          gomod=$(grep -oE 'wailsapp/wails/v2 v[0-9]+\.[0-9]+\.[0-9]+' go.mod | head -1 | sed 's/.* v/v/')
+          echo "README=${readme}  go.mod=${gomod}"
+          if [ "${readme}" != "${gomod}" ]; then
+            echo "::error::Wails version mismatch — sync README (wails@…) and go.mod."
+            exit 1
+          fi
+      - name: gofmt
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet (excluding GUI cgo packages)
+        shell: bash
+        run: go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+      - name: go test (excluding GUI cgo packages)
+        shell: bash
+        run: go test $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')

@@ -19,16 +19,41 @@ func TestIsNewer(t *testing.T) {
 		{"v1.2.0", "v1.0.0", true},
 		{"v1.0.0", "v1.0.0", false},
 		{"v1.0.0", "v1.2.0", false},
-		{"1.2.0", "1.0.0", true}, // missing leading v is normalized
-		{"v1.2.0", "dev", false}, // dev current never updates
-		{"dev", "v1.0.0", false}, // garbage latest ignored
-		{"v1.2.0", "", false},    // empty current
-		{"v1.2.0-rc1", "v1.1.0", true},
+		{"1.2.0", "1.0.0", true},            // missing leading v is normalized
+		{"v1.2.0", "dev", false},            // dev current never updates
+		{"dev", "v1.0.0", false},            // garbage latest ignored
+		{"v1.2.0", "", false},               // empty current
+		{"v1.2.0-rc1", "v1.1.0", false},     // stable build is never offered a prerelease
+		{"v1.2.0", "v1.2.0-rc1", true},      // a prerelease tester is offered the final
+		{"v1.2.0-rc2", "v1.2.0-rc1", true},  // rc -> newer rc (both prerelease)
+		{"v1.2.0-rc1", "v1.2.0-rc1", false}, // same prerelease
 	}
 	for _, c := range cases {
 		if got := isNewer(c.latest, c.current); got != c.want {
 			t.Errorf("isNewer(%q,%q)=%v want %v", c.latest, c.current, got, c.want)
 		}
+	}
+}
+
+// TestPrereleaseNotOfferedToStable covers both defense-in-depth layers: the
+// GitHub prerelease API flag (skipPrerelease, even for a stable-looking tag) and
+// the tag-suffix guard in isNewer.
+func TestPrereleaseNotOfferedToStable(t *testing.T) {
+	defer setVersion("v1.0.0")()
+
+	// API flag path: tag looks stable but the release is flagged prerelease.
+	flagged := release{TagName: "v1.3.0", Prerelease: true}
+	if buildResult(flagged).Newer {
+		t.Fatal("prerelease (API flag) must not be newer for a stable build")
+	}
+	// A normal stable release with the same tag IS newer.
+	normal := release{TagName: "v1.3.0"}
+	if !buildResult(normal).Newer {
+		t.Fatal("stable release should be newer than v1.0.0")
+	}
+	// Tag-suffix path: an -rc tag is not offered to a stable build.
+	if isNewer("v1.3.0-rc.1", "v1.0.0") {
+		t.Fatal("prerelease tag must not be newer for a stable build")
 	}
 }
 

@@ -253,11 +253,20 @@
       running = !!(lastState && lastState.running);
       if (lastState && lastState.mode) mode = lastState.mode;
       render();
+      notifyFallback();
     } catch (e) {
       showError(String(e.message || e));
     } finally {
       btn.disabled = false;
     }
+  }
+
+  // notifyFallback explains why a proxy bound to an alternate port: the configured
+  // one was busy or OS-reserved (common on Windows with Hyper-V/WSL/Docker). The
+  // connection card already shows the real address; this is the one-time "why".
+  function notifyFallback() {
+    const fb = (lastState && lastState.listeners || []).find((l) => l.fallback && l.up);
+    if (fb) toast("기본 포트가 사용 중이라 " + fb.addr + " 로 열었어요");
   }
 
   function selectMode(m) {
