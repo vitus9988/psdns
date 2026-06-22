@@ -7,15 +7,18 @@ package gui
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
 	"github.com/vitus9988/psdns/internal/selfupdate"
 	"github.com/vitus9988/psdns/internal/supervisor"
+	"github.com/vitus9988/psdns/internal/sysproxy"
 	"github.com/vitus9988/psdns/internal/uiconfig"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -51,6 +54,14 @@ type App struct {
 	// bgCancel cancels the in-flight startup update check so Shutdown can stop
 	// it rather than let it run (and emit) against a torn-down context.
 	bgCancel context.CancelFunc
+	// sysproxyMu serializes the apply/restore sequence and guards sysproxyOn, so a
+	// quick Start/Stop pair (Wails may dispatch bound calls on separate goroutines)
+	// cannot interleave the backup capture/write/restore/delete on the shared file.
+	sysproxyMu sync.Mutex
+	// sysproxyOn is true while this app has the OS web proxy pointed at us, so a
+	// restore is a no-op unless we changed it. It is set before Apply touches the
+	// OS, so even a partial apply failure is still undone by this session's Stop.
+	sysproxyOn bool
 }
 
 // NewApp builds the App. version is the GUI build version shown in the UI.
@@ -67,6 +78,12 @@ func NewApp(version string) *App {
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
 	a.startTray()
+	// A previous run may have crashed or been force-killed with the OS proxy
+	// still pointed at us; clean that up first so a fresh Start snapshots the
+	// real prior state. No-op on a clean start (no backup left behind).
+	if _, err := sysproxy.RecoverStale(); err != nil {
+		log.Printf("gui: stale system-proxy cleanup failed: %v", err)
+	}
 	bgCtx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
 	a.bgCancel = cancel
 	go a.backgroundCheck(bgCtx)
@@ -98,6 +115,10 @@ func (a *App) Shutdown(ctx context.Context) {
 	if a.bgCancel != nil {
 		a.bgCancel()
 	}
+	// Restore the OS proxy on every real exit (tray quit, window close, normal
+	// OnShutdown). A force-kill skips this; the next Startup's RecoverStale
+	// covers that — the two are a pair.
+	a.restoreSystemProxy()
 	a.stopTray()
 	if a.sup != nil {
 		_ = a.sup.Stop()
@@ -139,15 +160,82 @@ func (a *App) Start(mode string) (supervisor.State, error) {
 	if err := a.sup.Start(supervisor.Mode(mode)); err != nil {
 		return a.sup.Status(), friendlyStartErr(err)
 	}
-	return a.sup.WaitSettled(settleDelay), nil
+	st := a.sup.WaitSettled(settleDelay)
+	a.maybeApplySystemProxy(st)
+	return st, nil
 }
 
-// Stop tears down all servers.
+// Stop tears down all servers. The system proxy is restored before the servers
+// go down so the OS is never left pointing at a closing listener.
 func (a *App) Stop() (supervisor.State, error) {
+	a.restoreSystemProxy()
 	if err := a.sup.Stop(); err != nil {
 		return a.sup.Status(), err
 	}
 	return a.sup.Status(), nil
+}
+
+// maybeApplySystemProxy points the OS web proxy at the live HTTP proxy when the
+// user has the option enabled and an HTTP listener actually came up. Resolve mode
+// has no HTTP listener, so it is naturally skipped. Failure is non-fatal —
+// protection still works for apps pointed at the proxy by hand — so it only
+// surfaces a toast.
+func (a *App) maybeApplySystemProxy(st supervisor.State) {
+	if !a.sup.Config().SetSystemProxy {
+		return
+	}
+	var httpAddr string
+	for _, l := range st.Listeners {
+		if l.Kind == supervisor.KindHTTP && l.Up {
+			httpAddr = l.Addr // actual bound address, port fallback included
+			break
+		}
+	}
+	if httpAddr == "" {
+		return // resolve mode, or the HTTP listener failed to bind
+	}
+	s, err := sysproxy.FromAddr(httpAddr, sysproxy.DefaultBypass())
+	if err != nil {
+		return
+	}
+	a.sysproxyMu.Lock()
+	defer a.sysproxyMu.Unlock()
+	// Mark the restore as owed before Apply touches the OS: Apply writes its
+	// backup first, so a partial apply failure (e.g. macOS admin refusal mid-way)
+	// must still be undone by this session's Stop/Shutdown, not left only for the
+	// next launch's RecoverStale.
+	a.sysproxyOn = true
+	if err := sysproxy.Apply(s); err != nil {
+		a.emitSysProxy("error", "시스템 프록시 자동 설정에 실패했어요. 아래 주소를 복사해 브라우저에 직접 넣어 주세요.")
+		return
+	}
+	a.emitSysProxy("applied", "시스템 프록시를 자동으로 맞췄어요")
+}
+
+// restoreSystemProxy puts the OS proxy back if we changed it. The mutex + flag
+// make the Stop→Shutdown double call restore exactly once; on failure the flag
+// stays set so a later call retries (and the on-disk backup lets the next launch
+// recover as a final backstop).
+func (a *App) restoreSystemProxy() {
+	a.sysproxyMu.Lock()
+	defer a.sysproxyMu.Unlock()
+	if !a.sysproxyOn {
+		return
+	}
+	if err := sysproxy.Restore(); err != nil {
+		a.emitSysProxy("error", "시스템 프록시를 원래대로 되돌리지 못했어요. 네트워크 설정을 확인해 주세요.")
+		return
+	}
+	a.sysproxyOn = false
+	a.emitSysProxy("restored", "시스템 프록시를 원래대로 되돌렸어요")
+}
+
+// emitSysProxy sends a sysproxy:* event (a toast) to the frontend. No-op when the
+// runtime context is gone (e.g. mid-shutdown).
+func (a *App) emitSysProxy(kind, msg string) {
+	if a.ctx != nil {
+		wruntime.EventsEmit(a.ctx, "sysproxy:"+kind, msg)
+	}
 }
 
 // GetConfig returns the current configuration for the UI.

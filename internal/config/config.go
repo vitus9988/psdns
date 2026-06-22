@@ -36,6 +36,11 @@ type Config struct {
 	Frag         FragStrategy  // ClientHello fragmentation strategy
 	FragDelay    time.Duration // optional delay inserted between fragments
 	Timeout      time.Duration // dial / query timeout
+
+	// SetSystemProxy makes the GUI point the OS web proxy (http+https) at the
+	// running HTTP proxy on start and restore it on stop/quit. GUI-only: the CLI
+	// and supervisor never read this field, so their behavior is unchanged.
+	SetSystemProxy bool
 }
 
 // Default returns the baseline configuration. The default DoH endpoint uses an
@@ -50,5 +55,9 @@ func Default() Config {
 		Frag:        FragSplit,
 		FragDelay:   0,
 		Timeout:     10 * time.Second,
+
+		// Auto-configure the OS web proxy by default so the GUI's one button is
+		// enough; the GUI exposes a toggle to turn it off.
+		SetSystemProxy: true,
 	}
 }

@@ -23,6 +23,7 @@ func TestDefault(t *testing.T) {
 		{"Frag", c.Frag, config.FragSplit},
 		{"FragDelay", c.FragDelay, time.Duration(0)},
 		{"Timeout", c.Timeout, 10 * time.Second},
+		{"SetSystemProxy", c.SetSystemProxy, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

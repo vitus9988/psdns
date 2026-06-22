@@ -24,6 +24,9 @@ type Config struct {
 	Frag         string `json:"frag"` // none | split | tls-record
 	FragDelay    string `json:"fragDelay"`
 	Timeout      string `json:"timeout"`
+
+	// SetSystemProxy mirrors config.SetSystemProxy (GUI-only auto system proxy).
+	SetSystemProxy bool `json:"setSystemProxy"`
 }
 
 // SetResult is the response of a config update: the applied config plus any
@@ -44,6 +47,8 @@ func FromConfig(c config.Config) Config {
 		Frag:         string(c.Frag),
 		FragDelay:    c.FragDelay.String(),
 		Timeout:      c.Timeout.String(),
+
+		SetSystemProxy: c.SetSystemProxy,
 	}
 }
 
@@ -67,6 +72,9 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 	if u.SocksListen != "" {
 		c.SocksListen = u.SocksListen
 	}
+
+	// SetSystemProxy is a plain bool with no validation; carry it through.
+	c.SetSystemProxy = u.SetSystemProxy
 
 	switch config.FragStrategy(u.Frag) {
 	case config.FragNone, config.FragSplit, config.FragTLSRecord:

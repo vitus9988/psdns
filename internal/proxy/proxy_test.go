@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -312,24 +313,78 @@ func TestHTTPConnectEndToEnd(t *testing.T) {
 	assertFragmented(t, upstream, hello, sni)
 }
 
-// TestHTTPNonConnectRejected verifies a non-CONNECT request gets 501.
-func TestHTTPNonConnectRejected(t *testing.T) {
-	res := mockResolver(t, "127.0.0.1")
+// TestHTTPPlainForward verifies a plaintext (non-CONNECT) request is forwarded
+// to the DoH-resolved origin and the origin's response is relayed back, with the
+// request rewritten to origin form and the hop-by-hop proxy header stripped.
+func TestHTTPPlainForward(t *testing.T) {
+	// A minimal upstream origin: capture the forwarded request, reply with a body.
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer upLn.Close()
+
+	type forwarded struct {
+		reqURI   string
+		hasProxy bool
+		hostHdr  string
+	}
+	gotCh := make(chan forwarded, 1)
+	go func() {
+		conn, err := upLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		r, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			return
+		}
+		gotCh <- forwarded{
+			reqURI:   r.RequestURI,
+			hasProxy: r.Header.Get("Proxy-Connection") != "",
+			hostHdr:  r.Host,
+		}
+		fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
+	}()
+
+	_, upPort, _ := net.SplitHostPort(upLn.Addr().String())
+	res := mockResolver(t, "127.0.0.1") // every host resolves to loopback
 	addr := startHTTP(t, res)
 
 	conn := waitListen(t, addr)
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
-	if _, err := conn.Write([]byte("GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")); err != nil {
-		t.Fatalf("write GET: %v", err)
-	}
+	target := "blocked.example.com:" + upPort
+	fmt.Fprintf(conn, "GET http://%s/path?x=1 HTTP/1.1\r\nHost: %s\r\nProxy-Connection: keep-alive\r\n\r\n", target, target)
+
 	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(body) != "hi" {
+		t.Fatalf("body = %q, want %q", body, "hi")
+	}
+
+	select {
+	case g := <-gotCh:
+		if g.reqURI != "/path?x=1" {
+			t.Errorf("upstream request URI = %q, want origin-form /path?x=1", g.reqURI)
+		}
+		if g.hasProxy {
+			t.Errorf("Proxy-Connection header leaked to upstream")
+		}
+		if g.hostHdr != target {
+			t.Errorf("upstream Host = %q, want %q", g.hostHdr, target)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never received the forwarded request")
 	}
 }
 

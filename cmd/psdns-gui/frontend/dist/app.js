@@ -18,6 +18,7 @@
       dohUrl: "https://1.1.1.1/dns-query", dohBootstrap: "",
       dnsListen: "127.0.0.1:53", proxyListen: "127.0.0.1:8080",
       socksListen: "127.0.0.1:1080", frag: "split", fragDelay: "0s", timeout: "10s",
+      setSystemProxy: true,
     }),
     GetStatus: async () => ({ running: false, mode: "proxy", listeners: [] }),
     Start: async (m) => ({
@@ -105,6 +106,7 @@
   function render() {
     renderMode();
     renderSNI();
+    renderSysProxy();
     renderConn();
     renderAdvanced();
     renderStatus();
@@ -169,6 +171,12 @@
     });
   }
 
+  function renderSysProxy() {
+    // Default on: an unset value (older config) reads as enabled.
+    const on = !ui || ui.setSystemProxy !== false;
+    $("sysProxyToggle").setAttribute("aria-checked", on ? "true" : "false");
+  }
+
   function renderConn() {
     if (!ui) return;
     const card = $("connCard");
@@ -208,7 +216,7 @@
   function setControlsEnabled(on) {
     // These are <button>s, so the disabled attribute alone blocks interaction
     // and focus; the muted look is supplied by CSS ([disabled] rules).
-    document.querySelectorAll("#modeSeg .segment__btn, #sniToggle, #sniMethods .chip")
+    document.querySelectorAll("#modeSeg .segment__btn, #sniToggle, #sysProxyToggle, #sniMethods .chip")
       .forEach((el) => { el.toggleAttribute("disabled", !on); });
     document.querySelectorAll("#advanced input")
       .forEach((el) => { el.disabled = !on; });
@@ -281,6 +289,13 @@
     if (ui.frag === "none") ui.frag = lastFrag || "split";
     else { lastFrag = ui.frag; ui.frag = "none"; }
     renderSNI();
+    await persist();
+  }
+
+  async function toggleSysProxy() {
+    if (running || !ui) return;
+    ui.setSystemProxy = ui.setSystemProxy === false; // off -> on, otherwise -> off
+    renderSysProxy();
     await persist();
   }
 
@@ -370,6 +385,7 @@
     });
 
     $("sniToggle").addEventListener("click", toggleSNI);
+    $("sysProxyToggle").addEventListener("click", toggleSysProxy);
     document.querySelectorAll("#sniMethods .chip").forEach((c) => {
       c.addEventListener("click", () => selectFrag(c.dataset.frag));
     });
@@ -413,6 +429,10 @@
         $("updateProgress").style.width = "0%";
         $("updateClose").hidden = false;
       });
+      // System-proxy auto-config toasts, emitted by App.Start/Stop/Shutdown.
+      rt.EventsOn("sysproxy:applied", (m) => toast(m || "시스템 프록시를 자동으로 맞췄어요"));
+      rt.EventsOn("sysproxy:restored", (m) => toast(m || "시스템 프록시를 원래대로 되돌렸어요"));
+      rt.EventsOn("sysproxy:error", (m) => toast(m || "시스템 프록시 설정에 실패했어요"));
     }
   }
 

@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -182,6 +184,34 @@ func TestReadAddrIPv6(t *testing.T) {
 	host, ok := readAddr(br, 0x04)
 	if !ok || host != "2001:db8::1" {
 		t.Fatalf("IPv6 readAddr = %q,%v, want 2001:db8::1,true", host, ok)
+	}
+}
+
+func TestHostPortFromRequest(t *testing.T) {
+	cases := []struct {
+		name               string
+		rawURL             string
+		hostHdr            string
+		wantHost, wantPort string
+	}{
+		{"absolute with port", "http://example.com:8080/p", "", "example.com", "8080"},
+		{"absolute no port defaults 80", "http://example.com/p", "", "example.com", "80"},
+		{"origin form uses host header", "/p", "example.com", "example.com", "80"},
+		{"host header with port", "/p", "example.com:8443", "example.com", "8443"},
+		{"no host anywhere", "/p", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.rawURL)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.rawURL, err)
+			}
+			req := &http.Request{URL: u, Host: tc.hostHdr}
+			host, port := hostPortFromRequest(req)
+			if host != tc.wantHost || port != tc.wantPort {
+				t.Fatalf("hostPortFromRequest = %q,%q want %q,%q", host, port, tc.wantHost, tc.wantPort)
+			}
+		})
 	}
 }
 
