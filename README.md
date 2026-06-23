@@ -20,6 +20,16 @@
 
 프록시 모드는 클라이언트↔서버 TCP를 종단 분리하므로, 업스트림으로 나가는 세그먼트 경계를 완전히 제어할 수 있습니다. 이름 해석도 프록시 내부에서 DoH로 처리하므로 DNS·SNI 차단을 한 번에 우회합니다.
 
+### psdns가 하는 것 / 하지 않는 것
+
+| | 내용 |
+|---|---|
+| ✅ 한다 | 통신사 **DNS 위조**를 DoH 직접 해석으로 우회 |
+| ✅ 한다 | **SNI 기반 HTTPS 차단**을 ClientHello 분할로 우회 (효과는 DPI 구현에 따라) |
+| ❌ 아니다 | **VPN/풀터널이 아님** — 전체 트래픽을 터널링하지 않고 IP·위치를 숨기지 않음 |
+| ❌ 못 한다 | **IP 기반 차단** 우회 — 통신사가 목적지 IP로 직접 막으면 효과 없음 |
+| ⚠️ 보장 안 됨 | DPI 종류·**통신사 정책 변경**에 따라 무력화될 수 있음 |
+
 ## 설치 (릴리즈 바이너리)
 
 빌드 없이 바로 쓰려면 [GitHub Releases](https://github.com/vitus9988/psdns/releases)에서 OS/아키텍처에 맞는 아카이브를 받아 **압축만 풀면 됩니다.** 각 아카이브에는 CLI(`psdns`)와 GUI(`psdns-gui`)가 함께 들어 있습니다. CLI는 의존성 없는 단일 정적 실행파일이고, GUI는 OS에 내장된 웹뷰(Windows = WebView2, macOS = WebKit, Linux = WebKitGTK)를 사용합니다.
@@ -119,6 +129,7 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 | `-frag STRATEGY` | `split` | ClientHello 분할 전략: `none` / `split` / `tls-record` |
 | `-frag-delay D` | `0` | 조각 사이 지연 (예: `10ms`) |
 | `-timeout D` | `10s` | dial/질의 타임아웃 |
+| `-pprof ADDR` | (없음) | `net/http/pprof` 프로파일링 서버 주소 (디버그·측정용, 기본 꺼짐 → [측정 가이드](docs/measurements.md)) |
 
 - `-http ADDR` / `-socks ADDR` : 프록시 listen 주소 (`proxy`, `run`)
 - `-listen ADDR` : DNS listen 주소 (`resolve`)
@@ -134,7 +145,10 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 
 ## 한계 및 고지
 
-- SNI fragmentation 효과는 통신사 DPI 구현에 의존하므로 **모든 사이트/회선에서 보장되지 않습니다.** 안 통하는 경우 ECH(대상 사이트가 지원할 때) 또는 Tor 등 풀터널 방식이 대안입니다. 이 방식이 더 강하게 차단될 때 psdns가 철학(순수 유저스페이스·무설치·경량)을 지키며 추가로 적용할 수 있는 우회 전략 로드맵은 [`docs/bypass-roadmap.md`](docs/bypass-roadmap.md)에 정리돼 있습니다.
+- **psdns는 VPN이 아닙니다.** 전체 트래픽을 암호화 터널로 보내지 않고, 사용자의 IP 주소나 위치도 숨기지 않습니다. **DNS 위조와 SNI 기반 차단** 두 가지 기법만 무력화합니다 — 풀터널 익명성이 필요하면 Tor 등이 대안입니다.
+- **IP 기반 차단은 우회하지 못합니다.** 통신사가 도메인이 아니라 목적지 **IP 주소로** 직접 차단하면 psdns로는 뚫리지 않습니다(이름 해석·SNI 단계가 아니라 IP 라우팅 단계의 차단이기 때문입니다).
+- **SNI fragmentation 효과는 통신사 DPI 구현에 의존하므로 모든 사이트/회선에서 보장되지 않습니다.** 안 통하는 경우 ECH(대상 사이트가 지원할 때) 또는 Tor 등 풀터널 방식이 대안입니다.
+- **통신사 정책이 바뀌면 무력화될 수 있습니다.** DPI가 분할된 세그먼트를 재조립한 뒤 SNI를 검사하거나 DoH 엔드포인트(IP) 자체를 차단하기 시작하면 효과가 사라질 수 있습니다. psdns가 철학(순수 유저스페이스·무설치·경량)을 지키며 추가로 적용할 수 있는 우회 전략 로드맵은 [`docs/bypass-roadmap.md`](docs/bypass-roadmap.md)에 정리돼 있습니다.
 - 프록시 모드는 해당 프록시를 사용하도록 설정한 앱(브라우저 등)에만 적용됩니다. GUI의 **시스템 프록시 자동 설정**(기본 켜짐)은 OS 전역 웹 프록시를 psdns로 지정해 OS 프록시를 따르는 앱 전반에 적용되지만, Firefox 등 자체 프록시 설정을 쓰는 앱은 제외됩니다. **macOS에서는 시스템 프록시 변경에 관리자 권한이 필요할 수 있어** 자동 설정이 거부되면 주소를 복사해 직접 넣어야 할 수 있습니다(Windows·Linux는 사용자 권한으로 동작). 비정상 종료로 설정이 남아도 다음 실행 때 자동으로 정리됩니다.
 - GUI(`psdns-gui`)는 OS 내장 웹뷰를 사용합니다 — Windows는 WebView2(Win10+ 기본 탑재), macOS는 시스템 WebKit, Linux는 WebKitGTK(`libwebkit2gtk`) 런타임이 필요합니다(Linux는 트레이 표시에 `libayatana-appindicator3`도 필요). CLI(`psdns`)는 의존성 없는 단일 정적 바이너리입니다.
 - VPN/우회 기술 자체는 한국에서 합법입니다. 본 도구는 차단 메커니즘의 이해·연구 목적으로 제공되며, **접근 대상 콘텐츠의 적법성과 관련 정책 준수 책임은 사용자에게 있습니다.**
@@ -201,11 +215,14 @@ internal/frag       ClientHello 파싱 및 분할 전략
 internal/supervisor 서버 start/stop 오케스트레이션 (GUI가 구동)
 internal/gui        Wails 바인딩 (App 메서드·트레이/닫기 동작, 프런트엔드가 호출)
 internal/uiconfig   GUI 설정 DTO ↔ config 변환·검증
+internal/sysproxy   시스템 웹 프록시 자동 설정/복원 (GUI 전용, OS별)
 internal/selfupdate GitHub Releases 자동 업데이트 (확인·검증·교체)
-docs/               설계 문서 (우회 전략 로드맵 등)
-scripts/            크로스 빌드·패키징 스크립트
+docs/               설계 문서 (구조·측정·우회 전략 로드맵)
+scripts/            크로스 빌드·패키징·벤치마크 스크립트
 .github/workflows   릴리즈 자동화 (태그 push, OS별 매트릭스)
 ```
+
+모듈 의존 관계와 요청 처리 흐름(시퀀스 다이어그램)은 [`docs/architecture.md`](docs/architecture.md), 성능·측정 방법은 [`docs/measurements.md`](docs/measurements.md) 참고.
 
 ## 라이선스
 

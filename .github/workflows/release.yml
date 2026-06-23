@@ -94,9 +94,12 @@ jobs:
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
 
-      - name: Test (excluding GUI cgo packages)
+      - name: Test -race + coverage (excluding GUI cgo packages)
         shell: bash
-        run: go test $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+        run: |
+          pkgs=$(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+          go test -race -covermode=atomic -coverprofile=coverage.out $pkgs
+          go tool cover -func=coverage.out | tail -1
 
       - name: Import Apple Developer ID certificate
         if: matrix.label == 'macos' && env.MACOS_SIGN_IDENTITY != ''

@@ -20,9 +20,10 @@
 # Test binaries built with `go test -c`
 *.test
 
-# Coverage / profiling output
+# Coverage / profiling output (scripts/bench.sh -cpuprofile writes *.prof)
 *.out
 coverage.*
+*.prof
 
 # Go workspace files
 go.work

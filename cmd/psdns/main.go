@@ -13,6 +13,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -28,6 +30,12 @@ import (
 // version is the release version, injected at build time via
 // -ldflags "-X main.version=...". Defaults to "dev" for local builds.
 var version = "dev"
+
+// pprofAddr, set by the -pprof flag, opts into a net/http/pprof debug server.
+// It is empty by default, so a normal run starts no extra listener and carries
+// no profiling overhead. Profiling is a developer/measurement aid (see
+// docs/measurements.md), not part of the bypass path.
+var pprofAddr string
 
 func main() {
 	log.SetFlags(log.LstdFlags)
@@ -68,6 +76,7 @@ func bindCommon(fs *flag.FlagSet) (*config.Config, *string) {
 	fs.StringVar(&fragStr, "frag", fragStr, "ClientHello fragmentation: none|split|tls-record")
 	fs.DurationVar(&c.FragDelay, "frag-delay", c.FragDelay, "delay inserted between fragments (e.g. 10ms)")
 	fs.DurationVar(&c.Timeout, "timeout", c.Timeout, "dial/query timeout")
+	fs.StringVar(&pprofAddr, "pprof", pprofAddr, "serve net/http/pprof on this addr for profiling, e.g. 127.0.0.1:6060 (off by default)")
 	return &c, &fragStr
 }
 
@@ -108,6 +117,33 @@ func mustDoH(c *config.Config) *doh.Client {
 	return client
 }
 
+// maybeStartPprof starts a net/http/pprof debug server when -pprof was given. It
+// registers the profiling handlers on a private mux (not the global
+// DefaultServeMux) and serves them in the background; without the flag nothing
+// is started, so a normal run carries no overhead. Use it to profile a
+// long-running mode (see docs/measurements.md):
+//
+//	psdns proxy -pprof 127.0.0.1:6060
+//	go tool pprof http://127.0.0.1:6060/debug/pprof/heap
+func maybeStartPprof() {
+	if pprofAddr == "" {
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	srv := &http.Server{Addr: pprofAddr, Handler: mux}
+	go func() {
+		log.Printf("pprof: serving on http://%s/debug/pprof/", pprofAddr)
+		if err := srv.ListenAndServe(); err != nil {
+			log.Printf("pprof: %v", err)
+		}
+	}()
+}
+
 func runResolve(args []string) {
 	fs := flag.NewFlagSet("resolve", flag.ExitOnError)
 	c, fragStr := bindCommon(fs)
@@ -116,6 +152,7 @@ func runResolve(args []string) {
 	if err := finalize(c, *fragStr); err != nil {
 		log.Fatal(err)
 	}
+	maybeStartPprof()
 
 	srv := dnssrv.New(mustDoH(c), c.DNSListen, c.Timeout)
 	go onSignal(srv.Shutdown)
@@ -134,6 +171,7 @@ func runProxy(args []string) {
 	if err := finalize(c, *fragStr); err != nil {
 		log.Fatal(err)
 	}
+	maybeStartPprof()
 
 	res := resolver.New(mustDoH(c))
 	hp := proxy.NewHTTP(res, *c)
@@ -158,6 +196,7 @@ func runAll(args []string) {
 	if err := finalize(c, *fragStr); err != nil {
 		log.Fatal(err)
 	}
+	maybeStartPprof()
 
 	client := mustDoH(c)
 	res := resolver.New(client)
@@ -202,6 +241,7 @@ common flags:
   -frag STRATEGY    ClientHello fragmentation: none|split|tls-record (default split)
   -frag-delay D     delay between fragments, e.g. 10ms (default 0)
   -timeout D        dial/query timeout (default 10s)
+  -pprof ADDR       serve net/http/pprof on ADDR for profiling (off by default)
 
 resolve flags:
   -listen ADDR      DNS listen address (default 127.0.0.1:53; :53 needs privileges)

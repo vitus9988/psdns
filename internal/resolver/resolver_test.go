@@ -33,8 +33,9 @@ type dnsRR struct {
 
 // mockDoH stands up an httptest server speaking RFC 8484 wire format and a DoH
 // client pointed at it. reqCount counts the HTTP requests reaching the server,
-// which lets cache tests assert the upstream was (not) hit.
-func mockDoH(t *testing.T, ans answer) (*doh.Client, *int32) {
+// which lets cache tests assert the upstream was (not) hit. It takes testing.TB
+// so both tests (*testing.T) and benchmarks (*testing.B) can share it.
+func mockDoH(t testing.TB, ans answer) (*doh.Client, *int32) {
 	t.Helper()
 	var reqCount int32
 
