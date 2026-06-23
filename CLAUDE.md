@@ -23,6 +23,6 @@
   1. 수정사항을 `test` 브랜치에 커밋·푸시한다. → `ci.yml`(gofmt·vet·test·README↔go.mod Wails 대조)이 PR/푸시에서 돈다.
   2. `vX.Y.Z-rc.N` 태그(프리릴리즈)를 달아 푸시한다. → `release.yml` 이 6개 아카이브를 빌드해 **프리릴리즈**로 게시한다(`prerelease: contains(ref_name,'-')`). 실제 Windows/macOS 산출물을 받아 검증한다.
   3. 통과하면 `test` → `main` 으로 **PR·머지**한다.
-  4. `main` 에서 `vX.Y.Z`(접미사 없는) 태그를 달아 **정식 릴리즈**한다.
+  4. `main` 에서 `vX.Y.Z`(접미사 없는) 태그를 달아 **정식 릴리즈**한다. → 정식 태그 게시 후 `release.yml` 의 정리 스텝(`if: !contains(ref_name,'-')`)이 그 버전의 `vX.Y.Z-rc.*` 프리릴리즈/태그를 `GITHUB_TOKEN`(`contents: write`)으로 **자동 삭제**한다(rc 는 일회용이라 정식이 대체하면 폐기). 이 정리는 CI 에서 일어나므로 로컬 `gh` 인증이나 `release-main.sh` 실행에 의존하지 않는다 — `release-main.sh` 는 무엇이 정리될지 표시만 하고 직접 삭제하지 않는다.
 - **버전 규칙:** `-` 가 들어간 태그(`-rc.N`)는 프리릴리즈로 게시되며 자동 업데이트 대상에서 제외된다(`/releases/latest` 가 프리릴리즈를 빼고, `internal/selfupdate` 도 안정 빌드에 프리릴리즈를 제안하지 않음 — 이중 안전장치). 접미사 없는 `vX.Y.Z` 만 모든 사용자에게 자동 업데이트로 제안된다. **따라서 `-rc` 와 최종 태그를 헷갈리지 말 것.**
 - `main` 보호(PR 필수·`ci.yml` 통과 필수)는 GitHub 저장소 설정이라 코드로 강제되지 않는다 — 별도 수동 설정 권장.

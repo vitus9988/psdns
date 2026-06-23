@@ -168,7 +168,7 @@ git push origin v1.0.0
 3. 통과하면 `test` → `main` 으로 PR·머지합니다.
 4. `main`에서 접미사 없는 정식 태그를 push → 정식 릴리즈됩니다.
 
-1–2단계(테스트 프리릴리즈)는 `scripts/release-test.sh`, 3–4단계(정식 릴리즈)는 `scripts/release-main.sh` 로 자동화돼 있습니다(둘 다 `--dry-run` 으로 계획만 확인 가능). `release-test.sh` 는 현재 변경을 `test` 에 커밋·push 한 뒤 다음 `vX.Y.Z-rc.N` 을 자동 증가시켜 태그하고, `release-main.sh` 는 `test` → `main` 병합·push 후 접미사를 뗀 정식 `vX.Y.Z` 를 태그합니다(버전 생략 시 가장 높은 `-rc` 태그에서 도출).
+1–2단계(테스트 프리릴리즈)는 `scripts/release-test.sh`, 3–4단계(정식 릴리즈)는 `scripts/release-main.sh` 로 자동화돼 있습니다(둘 다 `--dry-run` 으로 계획만 확인 가능). `release-test.sh` 는 현재 변경을 `test` 에 커밋·push 한 뒤 다음 `vX.Y.Z-rc.N` 을 자동 증가시켜 태그하고, `release-main.sh` 는 `test` → `main` 병합·push 후 접미사를 뗀 정식 `vX.Y.Z` 를 태그합니다(버전 생략 시 가장 높은 `-rc` 태그에서 도출). 정식 태그가 게시되면 `release.yml` 이 그 버전의 `-rc` 프리릴리즈/태그를 **자동으로 정리**합니다(로컬 도구 불필요).
 
 `-`가 들어간 태그(`v1.0.0-rc.1`)는 자동으로 GitHub 프리릴리즈로 게시되며, `/releases/latest`가 프리릴리즈를 제외하므로(그리고 안정 빌드는 프리릴리즈로 자동 업데이트되지 않으므로) **기존 사용자에게 자동 배포되지 않습니다.** 접미사 없는 `vX.Y.Z`만 모든 사용자에게 자동 업데이트로 제안됩니다.
 
