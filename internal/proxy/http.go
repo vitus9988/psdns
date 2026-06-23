@@ -21,6 +21,7 @@ type HTTPProxy struct {
 	mu     sync.Mutex
 	ln     net.Listener
 	closed bool
+	track  connTracker
 }
 
 // NewHTTP creates an HTTP CONNECT proxy.
@@ -57,20 +58,36 @@ func (p *HTTPProxy) Serve(ln net.Listener) error {
 		if err != nil {
 			return err
 		}
-		go p.handle(conn)
+		if !p.track.add(conn) { // Close is already running: don't serve a doomed conn
+			_ = conn.Close()
+			continue
+		}
+		go func() {
+			defer p.track.remove(conn)
+			p.handle(conn)
+		}()
 	}
 }
 
-// Close stops the listener. It is safe to call concurrently with (or before)
-// ListenAndServe.
+// Close stops the listener and shuts down every live connection so in-flight
+// CONNECT tunnels end with a clean FIN instead of dying abruptly with the
+// process (which breaks a browser's HTTP/2 session carried over the tunnel).
+// It is safe to call concurrently with (or before) ListenAndServe, and is
+// idempotent.
 func (p *HTTPProxy) Close() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.closed = true
+	var err error
 	if p.ln != nil {
-		return p.ln.Close()
+		err = p.ln.Close()
 	}
-	return nil
+	p.mu.Unlock()
+
+	// Closing the client side wakes relay, whose closeBoth then closes the
+	// upstream too; drain briefly so the teardown flushes before we return.
+	p.track.closeAll()
+	p.track.wait(drainTimeout)
+	return err
 }
 
 func (p *HTTPProxy) handle(client net.Conn) {

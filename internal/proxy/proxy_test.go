@@ -578,3 +578,121 @@ func pickPort(t *testing.T) string {
 	_ = ln.Close()
 	return addr
 }
+
+// TestCloseTearsDownActiveTunnel is the regression test for the "HTTP/2 protocol
+// error" seen after shutdown: Close() must shut down a live CONNECT tunnel (a
+// clean FIN to the client) instead of leaving it for the dying process to reset.
+// Closing only the client side must also chain-close the upstream via relay's
+// closeBoth — well before the upstream's own read deadline would fire.
+func TestCloseTearsDownActiveTunnel(t *testing.T) {
+	const sni = "blocked.example.net"
+	const greeting = "LIVE-TUNNEL-GREETING"
+
+	upstream := newRecordingUpstream(t, greeting)
+	res := mockResolver(t, "127.0.0.1")
+
+	addr := pickPort(t)
+	cfg := testConfig(addr, "127.0.0.1:0")
+	hp := proxy.NewHTTP(res, cfg)
+	go func() { _ = hp.ListenAndServe() }()
+	waitListen(t, addr).Close()
+
+	conn := waitListen(t, addr)
+	defer conn.Close()
+	_ = conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
+
+	// Open a CONNECT tunnel and confirm it is live (greeting relays back).
+	target := net.JoinHostPort(sni, upstream.port())
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want 200", resp.StatusCode)
+	}
+	if _, err := conn.Write(buildClientHello(sni)); err != nil {
+		t.Fatalf("write ClientHello: %v", err)
+	}
+	got := make([]byte, len(greeting))
+	if _, err := io.ReadFull(br, got); err != nil {
+		t.Fatalf("read relayed greeting: %v", err)
+	}
+	if string(got) != greeting {
+		t.Fatalf("relayed greeting = %q, want %q", got, greeting)
+	}
+
+	// The tunnel is now idle but alive: a further read blocks until the proxy
+	// closes its side. Before the fix, Close() left this blocked.
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64)
+		_, rerr := br.Read(buf)
+		readDone <- rerr
+	}()
+	time.Sleep(100 * time.Millisecond) // let the read actually block
+	select {
+	case <-readDone:
+		t.Fatal("client read returned before Close — tunnel was not idle/live")
+	default:
+	}
+
+	start := time.Now()
+	if err := hp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Close must wake the client read (the tunnel was torn down) ...
+	select {
+	case <-readDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client read did not wake after Close — active tunnel was not torn down")
+	}
+	// ... and chain-close the upstream, well before its 2s read deadline.
+	select {
+	case <-upstream.done:
+		if d := time.Since(start); d > 1*time.Second {
+			t.Errorf("upstream closed after %v; likely its read deadline, not chain teardown", d)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("upstream not closed after Close — client->upstream teardown did not chain")
+	}
+}
+
+// TestCloseDrainsPromptlyWithActiveTunnels verifies Close() returns promptly
+// (does not hang on the drain) even with several live tunnels: closing the
+// client conns wakes each relay, so the WaitGroup drains far inside the timeout.
+func TestCloseDrainsPromptlyWithActiveTunnels(t *testing.T) {
+	res := mockResolver(t, "127.0.0.1")
+	upstream := newRecordingUpstream(t, "G")
+
+	addr := pickPort(t)
+	cfg := testConfig(addr, "127.0.0.1:0")
+	hp := proxy.NewHTTP(res, cfg)
+	go func() { _ = hp.ListenAndServe() }()
+	waitListen(t, addr).Close()
+
+	var conns []net.Conn
+	for i := 0; i < 5; i++ {
+		c := waitListen(t, addr)
+		conns = append(conns, c)
+		_ = c.SetDeadline(time.Now().Add(4 * time.Second))
+		target := net.JoinHostPort("h", upstream.port())
+		fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+		_, _ = http.ReadResponse(bufio.NewReader(c), &http.Request{Method: http.MethodConnect})
+	}
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() { _ = hp.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return promptly with active tunnels (drain hung)")
+	}
+}

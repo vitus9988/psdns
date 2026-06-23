@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // tlsRecord builds a TLS handshake record (content type 0x16) whose 2-byte
@@ -227,5 +228,73 @@ func TestReadAddrTruncated(t *testing.T) {
 	br := bufio.NewReader(bytes.NewReader([]byte{1, 2}))
 	if _, ok := readAddr(br, 0x01); ok {
 		t.Fatalf("truncated IPv4 addr should fail")
+	}
+}
+
+// TestConnTrackerAddAfterCloseRejected covers the accept-vs-Close race window:
+// once closeAll has run, add must refuse new conns (so Serve closes them) and
+// closeAll must have closed the conn it was already tracking.
+func TestConnTrackerAddAfterCloseRejected(t *testing.T) {
+	var tr connTracker
+	c1, peer1 := net.Pipe()
+	defer c1.Close()
+	defer peer1.Close()
+	if !tr.add(c1) {
+		t.Fatal("add on a fresh tracker should succeed")
+	}
+	tr.closeAll() // marks the tracker closing and closes c1
+
+	// closeAll closed the tracked conn: the peer's read wakes with an error.
+	errCh := make(chan error, 1)
+	go func() { _, e := peer1.Read(make([]byte, 1)); errCh <- e }()
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("closeAll should have closed the tracked conn")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("closeAll did not close the tracked conn (peer read still blocked)")
+	}
+
+	c2, peer2 := net.Pipe()
+	defer c2.Close()
+	defer peer2.Close()
+	if tr.add(c2) {
+		t.Fatal("add after closeAll must be rejected")
+	}
+
+	tr.remove(c1) // the c1 handler returns; the WaitGroup drains
+	if !tr.wait(time.Second) {
+		t.Fatal("wait did not drain after the only handler returned")
+	}
+}
+
+// TestConnTrackerCloseAllIdempotent verifies a second Close (Stop then Shutdown
+// both reach Close) neither panics nor blocks.
+func TestConnTrackerCloseAllIdempotent(t *testing.T) {
+	var tr connTracker
+	tr.closeAll()
+	tr.closeAll() // must not panic
+	if !tr.wait(time.Second) {
+		t.Fatal("empty tracker wait should return true immediately")
+	}
+}
+
+// TestConnTrackerWaitTimesOutWhileHandlerOutstanding verifies wait is bounded:
+// while a handler is still registered it times out, then drains after remove.
+func TestConnTrackerWaitTimesOutWhileHandlerOutstanding(t *testing.T) {
+	var tr connTracker
+	c, peer := net.Pipe()
+	defer c.Close()
+	defer peer.Close()
+	if !tr.add(c) {
+		t.Fatal("add should succeed")
+	}
+	if tr.wait(50 * time.Millisecond) {
+		t.Fatal("wait should time out while a handler is outstanding")
+	}
+	tr.remove(c)
+	if !tr.wait(time.Second) {
+		t.Fatal("wait should drain after remove")
 	}
 }
