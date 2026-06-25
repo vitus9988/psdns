@@ -47,6 +47,31 @@ func TestToConfigRoundTrip(t *testing.T) {
 	}
 }
 
+// TestToConfigSetSystemProxyRoundTrip pins that the bool survives ToConfig in
+// both directions. ToConfig seeds from Default() (true), so the explicit-false
+// case is the one that could regress if the assignment were dropped.
+func TestToConfigSetSystemProxyRoundTrip(t *testing.T) {
+	u := FromConfig(config.Default())
+	u.DNSListen = "127.0.0.1:5353" // avoid the :53 warning noise
+	if !u.SetSystemProxy {
+		t.Fatal("FromConfig(Default()) should carry SetSystemProxy=true")
+	}
+
+	u.SetSystemProxy = false
+	c, _, err := u.ToConfig()
+	if err != nil {
+		t.Fatalf("ToConfig: %v", err)
+	}
+	if c.SetSystemProxy {
+		t.Error("explicit SetSystemProxy=false must survive ToConfig, got true")
+	}
+
+	u.SetSystemProxy = true
+	if c, _, _ = u.ToConfig(); !c.SetSystemProxy {
+		t.Error("SetSystemProxy=true should round-trip")
+	}
+}
+
 func TestToConfigPort53Warns(t *testing.T) {
 	in := FromConfig(config.Default()) // DNSListen defaults to 127.0.0.1:53
 	_, warns, err := in.ToConfig()

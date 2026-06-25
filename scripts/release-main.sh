@@ -3,6 +3,9 @@
 # push main, then tag the final vX.Y.Z (no suffix) and push it (runs release.yml,
 # publishing a FULL release that every user is auto-updated to). Run this only
 # AFTER the rc pre-release has been validated on real Windows/macOS.
+# After the stable tag is pushed, release.yml (CI) automatically prunes that
+# version's -rc pre-releases/tags — no local gh auth needed — so the Releases
+# page doesn't accumulate stale rc entries.
 #
 # Usage: scripts/release-main.sh [--dry-run] [VERSION]
 #   VERSION    final version like 0.7.0 or v0.7.0. Default: strip the suffix from
@@ -36,10 +39,14 @@ else
   exit 1
 fi
 
+# 이 버전의 rc 프리릴리즈 — 정식 태그 push 뒤 release.yml 이 자동 정리한다(여기선 표시용).
+rcs="$(git tag --list "${FINAL}-rc.*" --sort=-v:refname)"
+
 echo "── psdns 정식 릴리즈 계획 ─────────────────────"
 echo "  기준 rc 태그 : ${highest_rc:-(없음)}"
 echo "  정식 버전    : ${FINAL}"
 echo "  동작        : test → main 병합(--no-ff), main push, ${FINAL} 태그 push, test 동기화"
+echo "  rc 정리(CI) : $(echo "${rcs:-(없음)}" | tr '\n' ' ')"
 echo "──────────────────────────────────────────────"
 if [ "$DRY" = 1 ]; then echo "[dry-run] 아무것도 변경하지 않았습니다."; exit 0; fi
 
@@ -67,5 +74,10 @@ git merge --ff-only main
 git push origin test
 
 echo "✓ 완료: ${FINAL} 정식 릴리즈가 곧 게시됩니다 (Actions → release.yml)."
+# rc 정리는 release.yml 의 'Prune this version's rc pre-releases' 스텝이 빌드 후
+# 자동 수행한다(GITHUB_TOKEN 사용, 로컬 gh 인증 불필요).
+if [ -n "$rcs" ]; then
+  echo "  (release.yml 가 빌드 후 ${FINAL}-rc.* 프리릴리즈/태그를 자동 정리합니다: $(echo "$rcs" | tr '\n' ' '))"
+fi
 echo "  https://github.com/vitus9988/psdns/releases/tag/${FINAL}"
 echo "  (현재 브랜치: test — 다음 작업을 바로 이어서 진행할 수 있습니다.)"

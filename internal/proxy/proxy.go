@@ -21,6 +21,12 @@ import (
 // maxTLSRecord is the maximum TLS plaintext fragment length (RFC 8446 §5.1).
 const maxTLSRecord = 16384
 
+// drainTimeout bounds how long Close waits for active connection handlers to
+// return after their client conns have been closed. Closing a client conn wakes
+// the relay io.Copy almost immediately, so this is only a safety net against a
+// wedged handler; a closing proxy never blocks longer than this.
+const drainTimeout = 250 * time.Millisecond
+
 // dialUpstream resolves host over DoH and dials the first reachable IP. The
 // returned connection has TCP_NODELAY enabled so fragment writes stay separate
 // segments.
@@ -110,4 +116,71 @@ func readFirstRecord(r io.Reader) ([]byte, error) {
 	body := make([]byte, recLen)
 	n, err := io.ReadFull(r, body)
 	return append(hdr, body[:n]...), err
+}
+
+// connTracker tracks live client connections so a closing proxy can shut them
+// down explicitly. Closing the client conn wakes relay's io.Copy, whose
+// closeBoth then tears down the matching upstream too, so tracking the client
+// side alone is enough to end every tunnel with a clean FIN instead of letting
+// it die abruptly with the process — an abrupt death breaks a browser's HTTP/2
+// session multiplexed over the CONNECT tunnel. The zero value is ready to use;
+// every method is safe for concurrent use.
+type connTracker struct {
+	mu      sync.Mutex
+	conns   map[net.Conn]struct{}
+	wg      sync.WaitGroup
+	closing bool
+}
+
+// add registers a client conn. It returns false if the tracker is already
+// closing (the accept-vs-Close window); the caller must then close the conn
+// itself and not serve it.
+func (t *connTracker) add(c net.Conn) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closing {
+		return false
+	}
+	if t.conns == nil {
+		t.conns = make(map[net.Conn]struct{})
+	}
+	t.conns[c] = struct{}{}
+	t.wg.Add(1)
+	return true
+}
+
+// remove deregisters a client conn when its handler returns. It only acts on a
+// conn that add accepted, so wg.Done is never called more times than wg.Add.
+func (t *connTracker) remove(c net.Conn) {
+	t.mu.Lock()
+	if _, ok := t.conns[c]; ok {
+		delete(t.conns, c)
+		t.wg.Done()
+	}
+	t.mu.Unlock()
+}
+
+// closeAll marks the tracker closing and closes every live client conn. It is
+// idempotent: a later call simply finds the surviving set (possibly empty).
+func (t *connTracker) closeAll() {
+	t.mu.Lock()
+	t.closing = true
+	for c := range t.conns {
+		_ = c.Close()
+	}
+	t.mu.Unlock()
+}
+
+// wait blocks until every tracked handler has returned or timeout elapses,
+// reporting whether it drained. Closing the conns in closeAll is what makes the
+// handlers return; this just bounds the wait.
+func (t *connTracker) wait(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() { t.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }

@@ -52,6 +52,9 @@ jobs:
       - name: go vet (excluding GUI cgo packages)
         shell: bash
         run: go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
-      - name: go test (excluding GUI cgo packages)
+      - name: go test -race + coverage (excluding GUI cgo packages)
         shell: bash
-        run: go test $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+        run: |
+          pkgs=$(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+          go test -race -covermode=atomic -coverprofile=coverage.out $pkgs
+          go tool cover -func=coverage.out | tail -1

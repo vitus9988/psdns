@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -312,24 +313,78 @@ func TestHTTPConnectEndToEnd(t *testing.T) {
 	assertFragmented(t, upstream, hello, sni)
 }
 
-// TestHTTPNonConnectRejected verifies a non-CONNECT request gets 501.
-func TestHTTPNonConnectRejected(t *testing.T) {
-	res := mockResolver(t, "127.0.0.1")
+// TestHTTPPlainForward verifies a plaintext (non-CONNECT) request is forwarded
+// to the DoH-resolved origin and the origin's response is relayed back, with the
+// request rewritten to origin form and the hop-by-hop proxy header stripped.
+func TestHTTPPlainForward(t *testing.T) {
+	// A minimal upstream origin: capture the forwarded request, reply with a body.
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer upLn.Close()
+
+	type forwarded struct {
+		reqURI   string
+		hasProxy bool
+		hostHdr  string
+	}
+	gotCh := make(chan forwarded, 1)
+	go func() {
+		conn, err := upLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		r, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			return
+		}
+		gotCh <- forwarded{
+			reqURI:   r.RequestURI,
+			hasProxy: r.Header.Get("Proxy-Connection") != "",
+			hostHdr:  r.Host,
+		}
+		fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
+	}()
+
+	_, upPort, _ := net.SplitHostPort(upLn.Addr().String())
+	res := mockResolver(t, "127.0.0.1") // every host resolves to loopback
 	addr := startHTTP(t, res)
 
 	conn := waitListen(t, addr)
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
-	if _, err := conn.Write([]byte("GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")); err != nil {
-		t.Fatalf("write GET: %v", err)
-	}
+	target := "blocked.example.com:" + upPort
+	fmt.Fprintf(conn, "GET http://%s/path?x=1 HTTP/1.1\r\nHost: %s\r\nProxy-Connection: keep-alive\r\n\r\n", target, target)
+
 	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(body) != "hi" {
+		t.Fatalf("body = %q, want %q", body, "hi")
+	}
+
+	select {
+	case g := <-gotCh:
+		if g.reqURI != "/path?x=1" {
+			t.Errorf("upstream request URI = %q, want origin-form /path?x=1", g.reqURI)
+		}
+		if g.hasProxy {
+			t.Errorf("Proxy-Connection header leaked to upstream")
+		}
+		if g.hostHdr != target {
+			t.Errorf("upstream Host = %q, want %q", g.hostHdr, target)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never received the forwarded request")
 	}
 }
 
@@ -522,4 +577,122 @@ func pickPort(t *testing.T) string {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 	return addr
+}
+
+// TestCloseTearsDownActiveTunnel is the regression test for the "HTTP/2 protocol
+// error" seen after shutdown: Close() must shut down a live CONNECT tunnel (a
+// clean FIN to the client) instead of leaving it for the dying process to reset.
+// Closing only the client side must also chain-close the upstream via relay's
+// closeBoth — well before the upstream's own read deadline would fire.
+func TestCloseTearsDownActiveTunnel(t *testing.T) {
+	const sni = "blocked.example.net"
+	const greeting = "LIVE-TUNNEL-GREETING"
+
+	upstream := newRecordingUpstream(t, greeting)
+	res := mockResolver(t, "127.0.0.1")
+
+	addr := pickPort(t)
+	cfg := testConfig(addr, "127.0.0.1:0")
+	hp := proxy.NewHTTP(res, cfg)
+	go func() { _ = hp.ListenAndServe() }()
+	waitListen(t, addr).Close()
+
+	conn := waitListen(t, addr)
+	defer conn.Close()
+	_ = conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
+
+	// Open a CONNECT tunnel and confirm it is live (greeting relays back).
+	target := net.JoinHostPort(sni, upstream.port())
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want 200", resp.StatusCode)
+	}
+	if _, err := conn.Write(buildClientHello(sni)); err != nil {
+		t.Fatalf("write ClientHello: %v", err)
+	}
+	got := make([]byte, len(greeting))
+	if _, err := io.ReadFull(br, got); err != nil {
+		t.Fatalf("read relayed greeting: %v", err)
+	}
+	if string(got) != greeting {
+		t.Fatalf("relayed greeting = %q, want %q", got, greeting)
+	}
+
+	// The tunnel is now idle but alive: a further read blocks until the proxy
+	// closes its side. Before the fix, Close() left this blocked.
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64)
+		_, rerr := br.Read(buf)
+		readDone <- rerr
+	}()
+	time.Sleep(100 * time.Millisecond) // let the read actually block
+	select {
+	case <-readDone:
+		t.Fatal("client read returned before Close — tunnel was not idle/live")
+	default:
+	}
+
+	start := time.Now()
+	if err := hp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Close must wake the client read (the tunnel was torn down) ...
+	select {
+	case <-readDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client read did not wake after Close — active tunnel was not torn down")
+	}
+	// ... and chain-close the upstream, well before its 2s read deadline.
+	select {
+	case <-upstream.done:
+		if d := time.Since(start); d > 1*time.Second {
+			t.Errorf("upstream closed after %v; likely its read deadline, not chain teardown", d)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("upstream not closed after Close — client->upstream teardown did not chain")
+	}
+}
+
+// TestCloseDrainsPromptlyWithActiveTunnels verifies Close() returns promptly
+// (does not hang on the drain) even with several live tunnels: closing the
+// client conns wakes each relay, so the WaitGroup drains far inside the timeout.
+func TestCloseDrainsPromptlyWithActiveTunnels(t *testing.T) {
+	res := mockResolver(t, "127.0.0.1")
+	upstream := newRecordingUpstream(t, "G")
+
+	addr := pickPort(t)
+	cfg := testConfig(addr, "127.0.0.1:0")
+	hp := proxy.NewHTTP(res, cfg)
+	go func() { _ = hp.ListenAndServe() }()
+	waitListen(t, addr).Close()
+
+	var conns []net.Conn
+	for i := 0; i < 5; i++ {
+		c := waitListen(t, addr)
+		conns = append(conns, c)
+		_ = c.SetDeadline(time.Now().Add(4 * time.Second))
+		target := net.JoinHostPort("h", upstream.port())
+		fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+		_, _ = http.ReadResponse(bufio.NewReader(c), &http.Request{Method: http.MethodConnect})
+	}
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() { _ = hp.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return promptly with active tunnels (drain hung)")
+	}
 }
