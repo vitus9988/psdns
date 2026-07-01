@@ -97,6 +97,7 @@ func TestToConfigRejectsBadInputs(t *testing.T) {
 		{"bad doh", func(u *Config) { u.DoHURL = "ftp://nope" }, "DoH 주소"},
 		{"bad bootstrap", func(u *Config) { u.DoHBootstrap = "not-an-ip" }, "부트스트랩"},
 		{"bootstrap hostname", func(u *Config) { u.DoHBootstrap = "example.com:853" }, "부트스트랩"},
+		{"bootstrap bad port", func(u *Config) { u.DoHBootstrap = "1.1.1.1:bad" }, "부트스트랩"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

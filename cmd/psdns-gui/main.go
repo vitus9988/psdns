@@ -7,8 +7,10 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
 
 	"github.com/vitus9988/psdns/internal/gui"
+	"github.com/vitus9988/psdns/internal/relaunch"
 	"github.com/vitus9988/psdns/internal/selfupdate"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -25,6 +27,13 @@ var version = "dev"
 var assets embed.FS
 
 func main() {
+	if handled, err := relaunch.Run(os.Args[1:]); handled {
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	// Keep the display version and the self-update version in sync when only one
 	// was injected at build time.
 	if version == "dev" && selfupdate.Version != "dev" {

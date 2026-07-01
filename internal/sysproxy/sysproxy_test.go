@@ -16,6 +16,9 @@ func TestFromAddr(t *testing.T) {
 		{"127.0.0.1:8080", "127.0.0.1", 8080, false},
 		{"127.0.0.1:8081", "127.0.0.1", 8081, false}, // fallback port
 		{":8080", "127.0.0.1", 8080, false},          // empty host -> loopback
+		{"0.0.0.0:8080", "127.0.0.1", 8080, false},   // wildcard -> dialable loopback
+		{"[::]:8080", "::1", 8080, false},            // IPv6 wildcard -> IPv6 loopback
+		{"[::1]:8080", "::1", 8080, false},
 		{"bad", "", 0, true},
 		{"127.0.0.1:0", "", 0, true},
 		{"127.0.0.1:99999", "", 0, true},
@@ -43,6 +46,11 @@ func TestFormatProxyServer(t *testing.T) {
 	want := "http=127.0.0.1:8080;https=127.0.0.1:8080"
 	if got != want {
 		t.Errorf("formatProxyServer = %q, want %q", got, want)
+	}
+	got = formatProxyServer("::1", 8080)
+	want = "http=[::1]:8080;https=[::1]:8080"
+	if got != want {
+		t.Errorf("formatProxyServer(IPv6) = %q, want %q", got, want)
 	}
 }
 

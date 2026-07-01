@@ -197,8 +197,12 @@ func TestHostPortFromRequest(t *testing.T) {
 	}{
 		{"absolute with port", "http://example.com:8080/p", "", "example.com", "8080"},
 		{"absolute no port defaults 80", "http://example.com/p", "", "example.com", "80"},
+		{"absolute bracketed IPv6 defaults 80", "http://[::1]/p", "", "::1", "80"},
+		{"absolute bracketed IPv6 with port", "http://[::1]:8080/p", "", "::1", "8080"},
 		{"origin form uses host header", "/p", "example.com", "example.com", "80"},
 		{"host header with port", "/p", "example.com:8443", "example.com", "8443"},
+		{"host header bracketed IPv6", "/p", "[::1]", "::1", "80"},
+		{"host header bracketed IPv6 with port", "/p", "[::1]:8080", "::1", "8080"},
 		{"no host anywhere", "/p", "", "", ""},
 	}
 	for _, tc := range cases {
@@ -213,6 +217,28 @@ func TestHostPortFromRequest(t *testing.T) {
 				t.Fatalf("hostPortFromRequest = %q,%q want %q,%q", host, port, tc.wantHost, tc.wantPort)
 			}
 		})
+	}
+}
+
+func TestSplitHostPortDefault(t *testing.T) {
+	cases := []struct {
+		hostport           string
+		defaultPort        string
+		wantHost, wantPort string
+	}{
+		{"example.com:443", "80", "example.com", "443"},
+		{"example.com", "80", "example.com", "80"},
+		{"[::1]:443", "80", "::1", "443"},
+		{"[::1]", "80", "::1", "80"},
+		{"::1", "80", "::1", "80"},
+		{"", "80", "", ""},
+	}
+	for _, tc := range cases {
+		host, port := splitHostPortDefault(tc.hostport, tc.defaultPort)
+		if host != tc.wantHost || port != tc.wantPort {
+			t.Errorf("splitHostPortDefault(%q,%q) = %q,%q want %q,%q",
+				tc.hostport, tc.defaultPort, host, port, tc.wantHost, tc.wantPort)
+		}
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/vitus9988/psdns/internal/config"
@@ -110,10 +111,7 @@ func (p *HTTPProxy) handle(client net.Conn) {
 // handleConnect tunnels an HTTPS CONNECT request: dial the target over DoH,
 // reply 200, then relay bytes with the ClientHello fragmented to defeat SNI DPI.
 func (p *HTTPProxy) handleConnect(client net.Conn, br *bufio.Reader, req *http.Request) {
-	host, port, err := net.SplitHostPort(req.Host)
-	if err != nil {
-		host, port = req.Host, "443"
-	}
+	host, port := splitHostPortDefault(req.Host, "443")
 
 	ctx, cancel := context.WithTimeout(context.Background(), p.cfg.Timeout)
 	upstream, err := dialUpstream(ctx, p.res, host, port, p.cfg.Timeout)
@@ -214,8 +212,24 @@ func hostPortFromRequest(req *http.Request) (host, port string) {
 	if hostport == "" {
 		return "", ""
 	}
+	return splitHostPortDefault(hostport, "80")
+}
+
+func splitHostPortDefault(hostport, defaultPort string) (host, port string) {
+	if hostport == "" {
+		return "", ""
+	}
 	if h, p, err := net.SplitHostPort(hostport); err == nil {
 		return h, p
 	}
-	return hostport, "80"
+	if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
+		unbracketed := strings.TrimSuffix(strings.TrimPrefix(hostport, "["), "]")
+		if net.ParseIP(unbracketed) != nil {
+			return unbracketed, defaultPort
+		}
+	}
+	if net.ParseIP(hostport) != nil {
+		return hostport, defaultPort
+	}
+	return hostport, defaultPort
 }

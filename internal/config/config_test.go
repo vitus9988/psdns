@@ -51,3 +51,31 @@ func TestFragStrategyConstants(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateBootstrap(t *testing.T) {
+	valid := []string{
+		"",
+		"1.1.1.1",
+		"1.1.1.1:853",
+		"2606:4700:4700::1111",
+		"[2606:4700:4700::1111]:853",
+	}
+	for _, bootstrap := range valid {
+		if err := config.ValidateBootstrap(bootstrap); err != nil {
+			t.Errorf("ValidateBootstrap(%q): %v", bootstrap, err)
+		}
+	}
+
+	invalid := []string{
+		"example.com",
+		"example.com:853",
+		"1.1.1.1:bad",
+		"1.1.1.1:99999",
+		"[2606:4700:4700::1111]",
+	}
+	for _, bootstrap := range invalid {
+		if err := config.ValidateBootstrap(bootstrap); err == nil {
+			t.Errorf("ValidateBootstrap(%q): expected error", bootstrap)
+		}
+	}
+}

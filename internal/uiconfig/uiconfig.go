@@ -111,16 +111,9 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 
 	// The bootstrap, when set, must be an IP (optionally with a port): it is the
 	// address actually dialed for the DoH host, so a hostname there would defeat
-	// the point of bypassing system DNS. doh.New treats a bad value as a bare
-	// host without complaint, so validate it here.
-	if c.DoHBootstrap != "" {
-		hostPart := c.DoHBootstrap
-		if h, _, err := net.SplitHostPort(c.DoHBootstrap); err == nil {
-			hostPart = h
-		}
-		if net.ParseIP(hostPart) == nil {
-			return c, warns, fmt.Errorf("부트스트랩 주소는 IP여야 해요: %q (예: 1.1.1.1 또는 1.1.1.1:853)", c.DoHBootstrap)
-		}
+	// the point of bypassing system DNS.
+	if err := config.ValidateBootstrap(c.DoHBootstrap); err != nil {
+		return c, warns, fmt.Errorf("부트스트랩 주소는 IP여야 해요: %q (예: 1.1.1.1 또는 1.1.1.1:853)", c.DoHBootstrap)
 	}
 
 	// Validate the DoH endpoint by actually constructing a client (no network).

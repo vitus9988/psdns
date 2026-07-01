@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
+	"github.com/vitus9988/psdns/internal/relaunch"
 	"github.com/vitus9988/psdns/internal/selfupdate"
 	"github.com/vitus9988/psdns/internal/supervisor"
 	"github.com/vitus9988/psdns/internal/sysproxy"
@@ -38,10 +39,15 @@ const (
 
 // App is the object bound to the Wails frontend.
 type App struct {
-	ctx     context.Context
 	version string
 	sup     *supervisor.Supervisor
 	updater *selfupdate.Checker
+
+	ctxMu sync.Mutex
+	ctx   context.Context
+	// bgCancel cancels the in-flight startup update check so Shutdown can stop
+	// it rather than let it run (and emit) against a torn-down context.
+	bgCancel context.CancelFunc
 
 	// quitting distinguishes a real quit (tray "종료하기" / the in-app button,
 	// which route through Quit) from the window's close button: BeforeClose
@@ -51,9 +57,6 @@ type App struct {
 	// hook); set by startTray, consumed by stopTray. Nil on Windows, which runs
 	// systray.Run and tears down via systray.Quit instead.
 	trayEnd func()
-	// bgCancel cancels the in-flight startup update check so Shutdown can stop
-	// it rather than let it run (and emit) against a torn-down context.
-	bgCancel context.CancelFunc
 	// sysproxyMu serializes the apply/restore sequence and guards sysproxyOn, so a
 	// quick Start/Stop pair (Wails may dispatch bound calls on separate goroutines)
 	// cannot interleave the backup capture/write/restore/delete on the shared file.
@@ -76,7 +79,7 @@ func NewApp(version string) *App {
 // Startup is wired to options.App.OnStartup: it captures the Wails runtime
 // context and starts a one-shot background update check.
 func (a *App) Startup(ctx context.Context) {
-	a.ctx = ctx
+	a.setRuntimeContext(ctx)
 	a.startTray()
 	// A previous run may have crashed or been force-killed with the OS proxy
 	// still pointed at us; clean that up first so a fresh Start snapshots the
@@ -85,7 +88,7 @@ func (a *App) Startup(ctx context.Context) {
 		log.Printf("gui: stale system-proxy cleanup failed: %v", err)
 	}
 	bgCtx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
-	a.bgCancel = cancel
+	a.setBackgroundCancel(cancel)
 	go a.backgroundCheck(bgCtx)
 }
 
@@ -112,9 +115,7 @@ func (a *App) shouldPreventClose() bool {
 // the tray and any running servers, and drop the runtime context so a late
 // background goroutine cannot emit against it.
 func (a *App) Shutdown(ctx context.Context) {
-	if a.bgCancel != nil {
-		a.bgCancel()
-	}
+	a.cancelBackgroundCheck()
 	// Restore the OS proxy on every real exit (tray quit, window close, normal
 	// OnShutdown). A force-kill skips this; the next Startup's RecoverStale
 	// covers that — the two are a pair.
@@ -123,17 +124,18 @@ func (a *App) Shutdown(ctx context.Context) {
 	if a.sup != nil {
 		_ = a.sup.Stop()
 	}
-	a.ctx = nil
+	a.setRuntimeContext(nil)
 }
 
 // OnSecondInstance brings the existing window to the front when the user
 // launches the app again (wired to SingleInstanceLock).
 func (a *App) OnSecondInstance(_ options.SecondInstanceData) {
-	if a.ctx == nil {
+	ctx := a.runtimeContext()
+	if ctx == nil {
 		return
 	}
-	wruntime.WindowUnminimise(a.ctx)
-	wruntime.Show(a.ctx)
+	wruntime.WindowUnminimise(ctx)
+	wruntime.Show(ctx)
 }
 
 func (a *App) backgroundCheck(ctx context.Context) {
@@ -141,8 +143,8 @@ func (a *App) backgroundCheck(ctx context.Context) {
 	if err != nil || !res.Newer {
 		return // offline, rate-limited, cancelled, or already up to date: stay quiet
 	}
-	if a.ctx != nil {
-		wruntime.EventsEmit(a.ctx, "update:available", res)
+	if ctx := a.runtimeContext(); ctx != nil {
+		wruntime.EventsEmit(ctx, "update:available", res)
 	}
 }
 
@@ -233,8 +235,8 @@ func (a *App) restoreSystemProxy() {
 // emitSysProxy sends a sysproxy:* event (a toast) to the frontend. No-op when the
 // runtime context is gone (e.g. mid-shutdown).
 func (a *App) emitSysProxy(kind, msg string) {
-	if a.ctx != nil {
-		wruntime.EventsEmit(a.ctx, "sysproxy:"+kind, msg)
+	if ctx := a.runtimeContext(); ctx != nil {
+		wruntime.EventsEmit(ctx, "sysproxy:"+kind, msg)
 	}
 }
 
@@ -267,8 +269,8 @@ func (a *App) CheckUpdate() (selfupdate.CheckResult, error) {
 // "update:progress" events, then restarts the app.
 func (a *App) ApplyUpdate() error {
 	err := a.updater.Apply(context.Background(), func(stage selfupdate.Stage, pct float64) {
-		if a.ctx != nil {
-			wruntime.EventsEmit(a.ctx, "update:progress", map[string]any{
+		if ctx := a.runtimeContext(); ctx != nil {
+			wruntime.EventsEmit(ctx, "update:progress", map[string]any{
 				"stage": string(stage), "pct": pct,
 			})
 		}
@@ -287,13 +289,13 @@ func (a *App) ApplyUpdate() error {
 func (a *App) restart() {
 	exe, err := os.Executable()
 	if err == nil {
-		cmd := exec.Command(exe, os.Args[1:]...)
+		cmd := exec.Command(exe, relaunch.Args(os.Getpid(), os.Args[1:])...)
 		cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
 		err = cmd.Start()
 	}
 	if err != nil {
-		if a.ctx != nil {
-			wruntime.EventsEmit(a.ctx, "update:error",
+		if ctx := a.runtimeContext(); ctx != nil {
+			wruntime.EventsEmit(ctx, "update:error",
 				"업데이트는 적용됐지만 자동 재시작에 실패했어요. 앱을 직접 다시 실행해 주세요.")
 		}
 		return
@@ -306,11 +308,40 @@ func (a *App) restart() {
 // BeforeClose to allow the close instead of hiding to the tray.
 func (a *App) Quit() {
 	a.quitting.Store(true)
+	a.restoreSystemProxy()
 	if a.sup != nil {
 		_ = a.sup.Stop()
 	}
-	if a.ctx != nil {
-		wruntime.Quit(a.ctx)
+	if ctx := a.runtimeContext(); ctx != nil {
+		wruntime.Quit(ctx)
+	}
+}
+
+func (a *App) setRuntimeContext(ctx context.Context) {
+	a.ctxMu.Lock()
+	a.ctx = ctx
+	a.ctxMu.Unlock()
+}
+
+func (a *App) runtimeContext() context.Context {
+	a.ctxMu.Lock()
+	defer a.ctxMu.Unlock()
+	return a.ctx
+}
+
+func (a *App) setBackgroundCancel(cancel context.CancelFunc) {
+	a.ctxMu.Lock()
+	a.bgCancel = cancel
+	a.ctxMu.Unlock()
+}
+
+func (a *App) cancelBackgroundCheck() {
+	a.ctxMu.Lock()
+	cancel := a.bgCancel
+	a.bgCancel = nil
+	a.ctxMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 

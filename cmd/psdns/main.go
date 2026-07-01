@@ -96,7 +96,13 @@ func finalize(c *config.Config, fragStr string) error {
 	if err := setFrag(c, fragStr); err != nil {
 		return err
 	}
-	return checkFragDelay(c.FragDelay)
+	if err := checkFragDelay(c.FragDelay); err != nil {
+		return err
+	}
+	if err := config.ValidateBootstrap(c.DoHBootstrap); err != nil {
+		return fmt.Errorf("invalid -bootstrap: %w", err)
+	}
+	return nil
 }
 
 // checkFragDelay rejects an out-of-range inter-fragment delay. Real values are

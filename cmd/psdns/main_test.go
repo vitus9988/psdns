@@ -52,6 +52,16 @@ func TestFinalize(t *testing.T) {
 	if err := finalize(&c, "split"); err == nil {
 		t.Error("finalize should reject an over-cap -frag-delay")
 	}
+	c = config.Default()
+	c.DoHBootstrap = "example.com:853"
+	if err := finalize(&c, "split"); err == nil {
+		t.Error("finalize should reject a hostname -bootstrap")
+	}
+	c = config.Default()
+	c.DoHBootstrap = "2606:4700:4700::1111"
+	if err := finalize(&c, "split"); err != nil {
+		t.Errorf("finalize should accept a bare IPv6 bootstrap: %v", err)
+	}
 }
 
 func TestCheckFragDelay(t *testing.T) {

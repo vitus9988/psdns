@@ -2,7 +2,12 @@
 // DNS resolver and the SNI-bypass proxy.
 package config
 
-import "time"
+import (
+	"fmt"
+	"net"
+	"strconv"
+	"time"
+)
 
 // FragStrategy selects how the first client→server payload (the TLS
 // ClientHello) is written to the upstream so that on-path DPI cannot parse
@@ -60,4 +65,25 @@ func Default() Config {
 		// enough; the GUI exposes a toggle to turn it off.
 		SetSystemProxy: true,
 	}
+}
+
+// ValidateBootstrap rejects a DoH bootstrap value that would require system DNS.
+// A valid bootstrap is an IP literal, optionally with a port. Bare IPv6 literals
+// are accepted; IPv6 with a port must use bracket notation.
+func ValidateBootstrap(bootstrap string) error {
+	if bootstrap == "" {
+		return nil
+	}
+	host := bootstrap
+	if h, p, err := net.SplitHostPort(bootstrap); err == nil {
+		host = h
+		port, err := strconv.Atoi(p)
+		if err != nil || port <= 0 || port > 65535 {
+			return fmt.Errorf("invalid bootstrap port in %q", bootstrap)
+		}
+	}
+	if net.ParseIP(host) == nil {
+		return fmt.Errorf("bootstrap must be an IP literal: %q", bootstrap)
+	}
+	return nil
 }

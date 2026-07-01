@@ -1,6 +1,7 @@
 package sysproxy
 
 import (
+	"net"
 	"strconv"
 	"strings"
 )
@@ -15,7 +16,7 @@ import (
 // https at the same proxy: "http=h:p;https=h:p". psdns also forwards plaintext
 // http, so the http entry is valid too.
 func formatProxyServer(host string, port int) string {
-	hp := host + ":" + strconv.Itoa(port)
+	hp := net.JoinHostPort(host, strconv.Itoa(port))
 	return "http=" + hp + ";https=" + hp
 }
 

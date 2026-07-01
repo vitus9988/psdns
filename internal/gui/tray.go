@@ -93,10 +93,11 @@ func applyTrayIcon() {
 // showWindow reveals the window after a hide-to-tray (or a minimise), reusing
 // the same reveal sequence as OnSecondInstance.
 func (a *App) showWindow() {
-	if a.ctx == nil {
+	ctx := a.runtimeContext()
+	if ctx == nil {
 		return
 	}
-	wruntime.WindowShow(a.ctx)
-	wruntime.WindowUnminimise(a.ctx)
-	wruntime.Show(a.ctx)
+	wruntime.WindowShow(ctx)
+	wruntime.WindowUnminimise(ctx)
+	wruntime.Show(ctx)
 }

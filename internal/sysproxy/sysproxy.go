@@ -35,10 +35,21 @@ func FromAddr(addr string, bypass []string) (Settings, error) {
 	if err != nil || port <= 0 || port > 65535 {
 		return Settings{}, fmt.Errorf("sysproxy: bad port in %q", addr)
 	}
-	if host == "" {
-		host = "127.0.0.1"
-	}
+	host = proxyHostForDial(host)
 	return Settings{Host: host, Port: port, Bypass: bypass}, nil
+}
+
+func proxyHostForDial(host string) string {
+	if host == "" {
+		return "127.0.0.1"
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		if ip.To4() != nil {
+			return "127.0.0.1"
+		}
+		return "::1"
+	}
+	return host
 }
 
 // DefaultBypass lists the hosts that must bypass the proxy: loopback and private
