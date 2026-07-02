@@ -67,17 +67,20 @@ func main() {
 }
 
 // bindCommon registers the flags shared by every subcommand and returns the
-// config plus a pointer to the raw --frag value (validated after Parse).
-func bindCommon(fs *flag.FlagSet) (*config.Config, *string) {
+// config plus pointers to raw string values that need validation after Parse.
+func bindCommon(fs *flag.FlagSet) (*config.Config, *string, *string) {
 	c := config.Default()
 	fragStr := string(c.Frag)
+	fallbacksStr := config.FormatDoHList(c.DoHFallbacks)
 	fs.StringVar(&c.DoHURL, "doh", c.DoHURL, "upstream DoH endpoint URL")
 	fs.StringVar(&c.DoHBootstrap, "bootstrap", c.DoHBootstrap, "IP[:port] to dial for the DoH host (bypass system DNS)")
+	fs.StringVar(&fallbacksStr, "doh-fallbacks", fallbacksStr, "comma-separated fallback DoH endpoint URLs")
+	fs.DurationVar(&c.DoHHedgeDelay, "doh-hedge-delay", c.DoHHedgeDelay, "delay before trying the next DoH fallback")
 	fs.StringVar(&fragStr, "frag", fragStr, "ClientHello fragmentation: none|split|tls-record")
 	fs.DurationVar(&c.FragDelay, "frag-delay", c.FragDelay, "delay inserted between fragments (e.g. 10ms)")
 	fs.DurationVar(&c.Timeout, "timeout", c.Timeout, "dial/query timeout")
 	fs.StringVar(&pprofAddr, "pprof", pprofAddr, "serve net/http/pprof on this addr for profiling, e.g. 127.0.0.1:6060 (off by default)")
-	return &c, &fragStr
+	return &c, &fragStr, &fallbacksStr
 }
 
 func setFrag(c *config.Config, s string) error {
@@ -92,15 +95,22 @@ func setFrag(c *config.Config, s string) error {
 
 // finalize validates the parsed common flags: the fragmentation strategy and
 // the inter-fragment delay bound.
-func finalize(c *config.Config, fragStr string) error {
+func finalize(c *config.Config, fragStr, fallbacksStr string) error {
+	c.DoHFallbacks = config.ParseDoHList(fallbacksStr)
 	if err := setFrag(c, fragStr); err != nil {
 		return err
 	}
 	if err := checkFragDelay(c.FragDelay); err != nil {
 		return err
 	}
+	if err := checkDoHHedgeDelay(c.DoHHedgeDelay); err != nil {
+		return err
+	}
 	if err := config.ValidateBootstrap(c.DoHBootstrap); err != nil {
 		return fmt.Errorf("invalid -bootstrap: %w", err)
+	}
+	if _, err := doh.NewExchanger(c.DoHURL, c.DoHBootstrap, c.DoHFallbacks, c.Timeout, c.DoHHedgeDelay); err != nil {
+		return fmt.Errorf("invalid DoH config: %w", err)
 	}
 	return nil
 }
@@ -115,12 +125,26 @@ func checkFragDelay(d time.Duration) error {
 	return nil
 }
 
-func mustDoH(c *config.Config) *doh.Client {
-	client, err := doh.New(c.DoHURL, c.DoHBootstrap, c.Timeout)
+func checkDoHHedgeDelay(d time.Duration) error {
+	if d < 0 || d > config.MaxDoHHedgeDelay {
+		return fmt.Errorf("invalid -doh-hedge-delay %v (want 0–%v)", d, config.MaxDoHHedgeDelay)
+	}
+	return nil
+}
+
+func mustDoH(c *config.Config) doh.Exchanger {
+	client, err := doh.NewExchanger(c.DoHURL, c.DoHBootstrap, c.DoHFallbacks, c.Timeout, c.DoHHedgeDelay)
 	if err != nil {
 		log.Fatalf("doh client: %v", err)
 	}
 	return client
+}
+
+func dohSummary(c *config.Config) string {
+	if len(c.DoHFallbacks) == 0 {
+		return c.DoHURL
+	}
+	return fmt.Sprintf("%s (+%d fallback)", c.DoHURL, len(c.DoHFallbacks))
 }
 
 // maybeStartPprof starts a net/http/pprof debug server when -pprof was given. It
@@ -152,17 +176,17 @@ func maybeStartPprof() {
 
 func runResolve(args []string) {
 	fs := flag.NewFlagSet("resolve", flag.ExitOnError)
-	c, fragStr := bindCommon(fs)
+	c, fragStr, fallbacksStr := bindCommon(fs)
 	fs.StringVar(&c.DNSListen, "listen", c.DNSListen, "local DNS listen address")
 	_ = fs.Parse(args)
-	if err := finalize(c, *fragStr); err != nil {
+	if err := finalize(c, *fragStr, *fallbacksStr); err != nil {
 		log.Fatal(err)
 	}
 	maybeStartPprof()
 
 	srv := dnssrv.New(mustDoH(c), c.DNSListen, c.Timeout)
 	go onSignal(srv.Shutdown)
-	log.Printf("psdns resolve: DNS on %s -> DoH %s", c.DNSListen, c.DoHURL)
+	log.Printf("psdns resolve: DNS on %s -> DoH %s", c.DNSListen, dohSummary(c))
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("dns server: %v", err)
 	}
@@ -170,11 +194,11 @@ func runResolve(args []string) {
 
 func runProxy(args []string) {
 	fs := flag.NewFlagSet("proxy", flag.ExitOnError)
-	c, fragStr := bindCommon(fs)
+	c, fragStr, fallbacksStr := bindCommon(fs)
 	fs.StringVar(&c.ProxyListen, "http", c.ProxyListen, "HTTP CONNECT proxy listen address")
 	fs.StringVar(&c.SocksListen, "socks", c.SocksListen, "SOCKS5 proxy listen address")
 	_ = fs.Parse(args)
-	if err := finalize(c, *fragStr); err != nil {
+	if err := finalize(c, *fragStr, *fallbacksStr); err != nil {
 		log.Fatal(err)
 	}
 	maybeStartPprof()
@@ -187,19 +211,19 @@ func runProxy(args []string) {
 	go func() { errCh <- hp.ListenAndServe() }()
 	go func() { errCh <- sp.ListenAndServe() }()
 	go onSignal(func() { _ = hp.Close(); _ = sp.Close() })
-	log.Printf("psdns proxy: HTTP %s | SOCKS5 %s | frag=%s -> DoH %s", c.ProxyListen, c.SocksListen, c.Frag, c.DoHURL)
+	log.Printf("psdns proxy: HTTP %s | SOCKS5 %s | frag=%s -> DoH %s", c.ProxyListen, c.SocksListen, c.Frag, dohSummary(c))
 	go notifyUpdate()
 	log.Fatal(<-errCh)
 }
 
 func runAll(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	c, fragStr := bindCommon(fs)
+	c, fragStr, fallbacksStr := bindCommon(fs)
 	fs.StringVar(&c.DNSListen, "dns", c.DNSListen, "local DNS listen address")
 	fs.StringVar(&c.ProxyListen, "http", c.ProxyListen, "HTTP CONNECT proxy listen address")
 	fs.StringVar(&c.SocksListen, "socks", c.SocksListen, "SOCKS5 proxy listen address")
 	_ = fs.Parse(args)
-	if err := finalize(c, *fragStr); err != nil {
+	if err := finalize(c, *fragStr, *fallbacksStr); err != nil {
 		log.Fatal(err)
 	}
 	maybeStartPprof()
@@ -215,7 +239,7 @@ func runAll(args []string) {
 	go func() { errCh <- hp.ListenAndServe() }()
 	go func() { errCh <- sp.ListenAndServe() }()
 	go onSignal(func() { dsrv.Shutdown(); _ = hp.Close(); _ = sp.Close() })
-	log.Printf("psdns run: DNS %s | HTTP %s | SOCKS5 %s | frag=%s -> DoH %s", c.DNSListen, c.ProxyListen, c.SocksListen, c.Frag, c.DoHURL)
+	log.Printf("psdns run: DNS %s | HTTP %s | SOCKS5 %s | frag=%s -> DoH %s", c.DNSListen, c.ProxyListen, c.SocksListen, c.Frag, dohSummary(c))
 	go notifyUpdate()
 	log.Fatal(<-errCh)
 }
@@ -242,12 +266,14 @@ usage:
   psdns version           print the version and exit
 
 common flags:
-  -doh URL          upstream DoH endpoint (default https://1.1.1.1/dns-query)
-  -bootstrap IP     IP[:port] to dial for the DoH host (bypass system DNS)
-  -frag STRATEGY    ClientHello fragmentation: none|split|tls-record (default split)
-  -frag-delay D     delay between fragments, e.g. 10ms (default 0)
-  -timeout D        dial/query timeout (default 10s)
-  -pprof ADDR       serve net/http/pprof on ADDR for profiling (off by default)
+  -doh URL               upstream DoH endpoint (default https://1.1.1.1/dns-query)
+  -bootstrap IP          IP[:port] to dial for the DoH host (bypass system DNS)
+  -doh-fallbacks URLS    comma-separated fallback DoH endpoints (default empty)
+  -doh-hedge-delay D     delay before each fallback, e.g. 250ms (default 250ms)
+  -frag STRATEGY         ClientHello fragmentation: none|split|tls-record (default split)
+  -frag-delay D          delay between fragments, e.g. 10ms (default 0)
+  -timeout D             dial/query timeout (default 10s)
+  -pprof ADDR            serve net/http/pprof on ADDR for profiling (off by default)
 
 resolve flags:
   -listen ADDR      DNS listen address (default 127.0.0.1:53; :53 needs privileges)

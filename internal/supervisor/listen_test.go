@@ -31,13 +31,13 @@ func TestListenTCPFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pre-bind: %v", err)
 	}
-	defer occupied.Close()
+	defer func() { _ = occupied.Close() }()
 
 	ln, err := listenTCPFallback(occupied.Addr().String())
 	if err != nil {
 		t.Fatalf("listenTCPFallback: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	if ln.Addr().String() == occupied.Addr().String() {
 		t.Fatalf("expected a different bound port, got the occupied one %s", ln.Addr())
 	}

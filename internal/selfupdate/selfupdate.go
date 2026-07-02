@@ -131,7 +131,7 @@ func (c *Checker) fetchLatest(ctx context.Context) (release, error) {
 	if err != nil {
 		return release{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch {
 	case resp.StatusCode == http.StatusForbidden, resp.StatusCode == http.StatusTooManyRequests:

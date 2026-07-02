@@ -31,7 +31,7 @@ type entry struct {
 
 // Resolver resolves names via a DoH client.
 type Resolver struct {
-	doh   *doh.Client
+	doh   doh.Exchanger
 	mu    sync.Mutex
 	cache map[string]entry
 	// inflight collapses concurrent misses for the same host into a single
@@ -48,7 +48,7 @@ type inflightCall struct {
 }
 
 // New returns a Resolver backed by the given DoH client.
-func New(c *doh.Client) *Resolver {
+func New(c doh.Exchanger) *Resolver {
 	return &Resolver{doh: c, cache: make(map[string]entry), inflight: make(map[string]*inflightCall)}
 }
 

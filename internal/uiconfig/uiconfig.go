@@ -16,14 +16,16 @@ import (
 // as human strings ("10s", "10ms") because Wails/JSON marshals time.Duration as
 // a raw int64 nanosecond count, which is unusable in the UI.
 type Config struct {
-	DoHURL       string `json:"dohUrl"`
-	DoHBootstrap string `json:"dohBootstrap"`
-	DNSListen    string `json:"dnsListen"`
-	ProxyListen  string `json:"proxyListen"`
-	SocksListen  string `json:"socksListen"`
-	Frag         string `json:"frag"` // none | split | tls-record
-	FragDelay    string `json:"fragDelay"`
-	Timeout      string `json:"timeout"`
+	DoHURL        string `json:"dohUrl"`
+	DoHBootstrap  string `json:"dohBootstrap"`
+	DoHFallbacks  string `json:"dohFallbacks"`
+	DoHHedgeDelay string `json:"dohHedgeDelay"`
+	DNSListen     string `json:"dnsListen"`
+	ProxyListen   string `json:"proxyListen"`
+	SocksListen   string `json:"socksListen"`
+	Frag          string `json:"frag"` // none | split | tls-record
+	FragDelay     string `json:"fragDelay"`
+	Timeout       string `json:"timeout"`
 
 	// SetSystemProxy mirrors config.SetSystemProxy (GUI-only auto system proxy).
 	SetSystemProxy bool `json:"setSystemProxy"`
@@ -39,14 +41,16 @@ type SetResult struct {
 // FromConfig renders a runtime config for the UI.
 func FromConfig(c config.Config) Config {
 	return Config{
-		DoHURL:       c.DoHURL,
-		DoHBootstrap: c.DoHBootstrap,
-		DNSListen:    c.DNSListen,
-		ProxyListen:  c.ProxyListen,
-		SocksListen:  c.SocksListen,
-		Frag:         string(c.Frag),
-		FragDelay:    c.FragDelay.String(),
-		Timeout:      c.Timeout.String(),
+		DoHURL:        c.DoHURL,
+		DoHBootstrap:  c.DoHBootstrap,
+		DoHFallbacks:  config.FormatDoHList(c.DoHFallbacks),
+		DoHHedgeDelay: c.DoHHedgeDelay.String(),
+		DNSListen:     c.DNSListen,
+		ProxyListen:   c.ProxyListen,
+		SocksListen:   c.SocksListen,
+		Frag:          string(c.Frag),
+		FragDelay:     c.FragDelay.String(),
+		Timeout:       c.Timeout.String(),
 
 		SetSystemProxy: c.SetSystemProxy,
 	}
@@ -63,6 +67,7 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 		c.DoHURL = u.DoHURL
 	}
 	c.DoHBootstrap = u.DoHBootstrap
+	c.DoHFallbacks = config.ParseDoHList(u.DoHFallbacks)
 	if u.DNSListen != "" {
 		c.DNSListen = u.DNSListen
 	}
@@ -95,6 +100,16 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 		}
 		c.FragDelay = d
 	}
+	if u.DoHHedgeDelay != "" {
+		d, err := time.ParseDuration(u.DoHHedgeDelay)
+		if err != nil {
+			return c, warns, fmt.Errorf("DoH 폴백 지연 형식이 올바르지 않아요: %q (예: 250ms)", u.DoHHedgeDelay)
+		}
+		if d < 0 || d > config.MaxDoHHedgeDelay {
+			return c, warns, fmt.Errorf("DoH 폴백 지연이 범위를 벗어났어요: %q (0 ~ %v)", u.DoHHedgeDelay, config.MaxDoHHedgeDelay)
+		}
+		c.DoHHedgeDelay = d
+	}
 	if u.Timeout != "" {
 		d, err := time.ParseDuration(u.Timeout)
 		if err != nil {
@@ -117,7 +132,7 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 	}
 
 	// Validate the DoH endpoint by actually constructing a client (no network).
-	if _, err := doh.New(c.DoHURL, c.DoHBootstrap, c.Timeout); err != nil {
+	if _, err := doh.NewExchanger(c.DoHURL, c.DoHBootstrap, c.DoHFallbacks, c.Timeout, c.DoHHedgeDelay); err != nil {
 		return c, warns, fmt.Errorf("DoH 주소가 올바르지 않아요: %v", err)
 	}
 

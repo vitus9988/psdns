@@ -126,6 +126,8 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 |---|---|---|
 | `-doh URL` | `https://1.1.1.1/dns-query` | 업스트림 DoH 엔드포인트 |
 | `-bootstrap IP` | (없음) | DoH 호스트를 해석할 IP[:port] (시스템 DNS 우회) |
+| `-doh-fallbacks URLS` | (없음) | 기본 DoH가 느리거나 실패할 때 시도할 fallback DoH 엔드포인트(콤마 구분) |
+| `-doh-hedge-delay D` | `250ms` | 다음 fallback DoH 질의를 시작하기 전 대기 시간 |
 | `-frag STRATEGY` | `split` | ClientHello 분할 전략: `none` / `split` / `tls-record` |
 | `-frag-delay D` | `0` | 조각 사이 지연 (예: `10ms`) |
 | `-timeout D` | `10s` | dial/질의 타임아웃 |
@@ -142,6 +144,7 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 - **`none`**: 분할 없음 (DNS 차단만 우회, 비교/디버그용).
 
 기본 DoH 엔드포인트는 IP 리터럴 호스트(`1.1.1.1`)라서 DoH 연결 자체에는 SNI가 실리지 않고 DNS 부트스트랩도 필요 없습니다.
+기본 엔드포인트가 막히거나 느린 회선에서는 `-doh-fallbacks https://8.8.8.8/dns-query,https://9.9.9.9/dns-query`처럼 fallback을 지정할 수 있습니다. psdns는 기본 DoH를 먼저 쓰고, `-doh-hedge-delay` 동안 응답이 없거나 실패하면 fallback을 순차적으로 시작해 첫 성공 응답을 사용합니다.
 
 ## 한계 및 고지
 

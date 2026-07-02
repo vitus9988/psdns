@@ -16,6 +16,7 @@
     Version: async () => "dev (preview)",
     GetConfig: async () => ({
       dohUrl: "https://1.1.1.1/dns-query", dohBootstrap: "",
+      dohFallbacks: "", dohHedgeDelay: "250ms",
       dnsListen: "127.0.0.1:53", proxyListen: "127.0.0.1:8080",
       socksListen: "127.0.0.1:1080", frag: "split", fragDelay: "0s", timeout: "10s",
       setSystemProxy: true,
@@ -207,6 +208,8 @@
     if (!ui) return;
     $("fDoh").value = ui.dohUrl || "";
     $("fBootstrap").value = ui.dohBootstrap || "";
+    $("fDohFallbacks").value = ui.dohFallbacks || "";
+    $("fDohHedgeDelay").value = ui.dohHedgeDelay || "";
     $("fFragDelay").value = ui.fragDelay || "";
     $("fTimeout").value = ui.timeout || "";
     $("fHttp").value = ui.proxyListen || "";
@@ -227,6 +230,8 @@
   function readAdvancedInto(c) {
     c.dohUrl = $("fDoh").value.trim();
     c.dohBootstrap = $("fBootstrap").value.trim();
+    c.dohFallbacks = $("fDohFallbacks").value.trim();
+    c.dohHedgeDelay = $("fDohHedgeDelay").value.trim();
     c.fragDelay = $("fFragDelay").value.trim();
     c.timeout = $("fTimeout").value.trim();
     c.proxyListen = $("fHttp").value.trim();

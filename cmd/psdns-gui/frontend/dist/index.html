@@ -138,10 +138,18 @@
             <label for="fBootstrap">부트스트랩 IP</label>
             <input id="fBootstrap" type="text" placeholder="비워 두면 자동으로 처리해요" />
           </div>
+          <div class="field">
+            <label for="fDohFallbacks">DoH 폴백 주소</label>
+            <input id="fDohFallbacks" type="text" inputmode="url" placeholder="예: https://8.8.8.8/dns-query,https://9.9.9.9/dns-query" />
+          </div>
           <div class="field-row">
             <div class="field">
               <label for="fFragDelay">조각 사이 지연</label>
               <input id="fFragDelay" type="text" placeholder="0s (예: 10ms)" />
+            </div>
+            <div class="field">
+              <label for="fDohHedgeDelay">DoH 폴백 지연</label>
+              <input id="fDohHedgeDelay" type="text" placeholder="250ms" />
             </div>
             <div class="field">
               <label for="fTimeout">응답 대기 시간</label>

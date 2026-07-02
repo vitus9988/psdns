@@ -15,7 +15,7 @@ import (
 
 // Server listens on UDP and TCP and relays queries to a DoH upstream.
 type Server struct {
-	doh     *doh.Client
+	doh     doh.Exchanger
 	timeout time.Duration
 	addr    string
 	udp     *dns.Server
@@ -23,7 +23,7 @@ type Server struct {
 }
 
 // New builds a server listening on addr (host:port).
-func New(c *doh.Client, addr string, timeout time.Duration) *Server {
+func New(c doh.Exchanger, addr string, timeout time.Duration) *Server {
 	s := &Server{doh: c, timeout: timeout, addr: addr}
 	h := dns.HandlerFunc(s.handle)
 	s.udp = &dns.Server{Addr: addr, Net: "udp", Handler: h}

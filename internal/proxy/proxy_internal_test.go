@@ -265,8 +265,8 @@ func TestReadAddrTruncated(t *testing.T) {
 func TestConnTrackerAddAfterCloseRejected(t *testing.T) {
 	var tr connTracker
 	c1, peer1 := net.Pipe()
-	defer c1.Close()
-	defer peer1.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = peer1.Close() }()
 	if !tr.add(c1) {
 		t.Fatal("add on a fresh tracker should succeed")
 	}
@@ -285,8 +285,8 @@ func TestConnTrackerAddAfterCloseRejected(t *testing.T) {
 	}
 
 	c2, peer2 := net.Pipe()
-	defer c2.Close()
-	defer peer2.Close()
+	defer func() { _ = c2.Close() }()
+	defer func() { _ = peer2.Close() }()
 	if tr.add(c2) {
 		t.Fatal("add after closeAll must be rejected")
 	}
@@ -334,8 +334,8 @@ func FuzzReadFirstRecord(f *testing.F) {
 func TestRelayServerSpeaksFirstSurvivesQuietClient(t *testing.T) {
 	proxyClient, extClient := net.Pipe()
 	proxyUp, extUp := net.Pipe()
-	defer extClient.Close()
-	defer extUp.Close()
+	defer func() { _ = extClient.Close() }()
+	defer func() { _ = extUp.Close() }()
 
 	cfg := config.Default()
 	cfg.Frag = config.FragNone
@@ -381,8 +381,8 @@ func TestRelayServerSpeaksFirstSurvivesQuietClient(t *testing.T) {
 func TestConnTrackerWaitTimesOutWhileHandlerOutstanding(t *testing.T) {
 	var tr connTracker
 	c, peer := net.Pipe()
-	defer c.Close()
-	defer peer.Close()
+	defer func() { _ = c.Close() }()
+	defer func() { _ = peer.Close() }()
 	if !tr.add(c) {
 		t.Fatal("add should succeed")
 	}

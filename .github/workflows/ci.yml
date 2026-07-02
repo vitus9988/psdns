@@ -52,6 +52,14 @@ jobs:
       - name: go vet (excluding GUI cgo packages)
         shell: bash
         run: go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12
+          install-only: true
+      - name: golangci-lint (excluding GUI cgo packages)
+        shell: bash
+        run: golangci-lint run $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
       - name: go test -race + coverage (excluding GUI cgo packages)
         shell: bash
         run: |

@@ -118,7 +118,7 @@ func (p *HTTPProxy) handleConnect(client net.Conn, br *bufio.Reader, req *http.R
 	cancel()
 	if err != nil {
 		log.Printf("http-proxy: dial %s failed: %v", req.Host, err)
-		fmt.Fprint(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
+		_, _ = fmt.Fprint(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		_ = client.Close()
 		return
 	}
@@ -142,7 +142,7 @@ func (p *HTTPProxy) handleConnect(client net.Conn, br *bufio.Reader, req *http.R
 // each request dials a fresh upstream because a keep-alive client may target a
 // different host per request.
 func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Request) {
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	for {
 		if req == nil {
@@ -155,7 +155,7 @@ func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Req
 
 		host, port := hostPortFromRequest(req)
 		if host == "" {
-			fmt.Fprint(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
+			_, _ = fmt.Fprint(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
 			return
 		}
 
@@ -164,7 +164,7 @@ func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Req
 		cancel()
 		if derr != nil {
 			log.Printf("http-proxy: dial %s failed: %v", req.Host, derr)
-			fmt.Fprint(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
+			_, _ = fmt.Fprint(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 			return
 		}
 

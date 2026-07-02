@@ -98,7 +98,7 @@ func relay(clientRead io.Reader, client, upstream net.Conn, cfg config.Config) {
 			// fragmentation attempt and relay the rest verbatim so the tunnel
 			// survives. Any other error (EOF, closed conn) ends the relay.
 			var ne net.Error
-			if !(errors.As(rerr, &ne) && ne.Timeout()) {
+			if !errors.As(rerr, &ne) || !ne.Timeout() {
 				return
 			}
 		}

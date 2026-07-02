@@ -82,7 +82,7 @@ func (u *recordingUpstream) serve() {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	// Send greeting first so the client (proxy relay) has something to forward
 	// back regardless of read timing.
 	_, _ = conn.Write(u.greeting)
@@ -181,7 +181,7 @@ func startSOCKS(t *testing.T, res *resolver.Resolver) string {
 	sp := proxy.NewSOCKS(res, cfg)
 	go func() { _ = sp.ListenAndServe() }()
 	t.Cleanup(func() { _ = sp.Close() })
-	waitListen(t, addr).Close()
+	_ = waitListen(t, addr).Close()
 	return addr
 }
 
@@ -194,7 +194,7 @@ func startHTTP(t *testing.T, res *resolver.Resolver) string {
 	hp := proxy.NewHTTP(res, cfg)
 	go func() { _ = hp.ListenAndServe() }()
 	t.Cleanup(func() { _ = hp.Close() })
-	waitListen(t, addr).Close()
+	_ = waitListen(t, addr).Close()
 	return addr
 }
 
@@ -211,7 +211,7 @@ func TestSOCKS5EndToEnd(t *testing.T) {
 	addr := startSOCKS(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
 	// Greeting: VER=5, NMETHODS=1, METHOD=0 (no auth).
@@ -278,7 +278,7 @@ func TestHTTPConnectEndToEnd(t *testing.T) {
 	addr := startHTTP(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
 	target := net.JoinHostPort(sni, upstream.port())
@@ -322,7 +322,7 @@ func TestHTTPPlainForward(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen upstream: %v", err)
 	}
-	defer upLn.Close()
+	defer func() { _ = upLn.Close() }()
 
 	type forwarded struct {
 		reqURI   string
@@ -335,7 +335,7 @@ func TestHTTPPlainForward(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		r, err := http.ReadRequest(bufio.NewReader(conn))
 		if err != nil {
 			return
@@ -345,7 +345,7 @@ func TestHTTPPlainForward(t *testing.T) {
 			hasProxy: r.Header.Get("Proxy-Connection") != "",
 			hostHdr:  r.Host,
 		}
-		fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
+		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
 	}()
 
 	_, upPort, _ := net.SplitHostPort(upLn.Addr().String())
@@ -353,11 +353,11 @@ func TestHTTPPlainForward(t *testing.T) {
 	addr := startHTTP(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
 	target := "blocked.example.com:" + upPort
-	fmt.Fprintf(conn, "GET http://%s/path?x=1 HTTP/1.1\r\nHost: %s\r\nProxy-Connection: keep-alive\r\n\r\n", target, target)
+	_, _ = fmt.Fprintf(conn, "GET http://%s/path?x=1 HTTP/1.1\r\nHost: %s\r\nProxy-Connection: keep-alive\r\n\r\n", target, target)
 
 	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
 	if err != nil {
@@ -394,7 +394,7 @@ func TestSOCKS5UnsupportedCommand(t *testing.T) {
 	addr := startSOCKS(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
@@ -442,7 +442,7 @@ func TestSOCKS5DialFailure(t *testing.T) {
 	addr := startSOCKS(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
@@ -475,7 +475,7 @@ func TestSOCKS5BadVersion(t *testing.T) {
 	addr := startSOCKS(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 
 	// SOCKS4 version byte (0x04) is rejected by the SOCKS5 handler.
@@ -496,7 +496,7 @@ func TestHTTPMalformedRequest(t *testing.T) {
 	addr := startHTTP(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 
 	// Garbage that http.ReadRequest cannot parse -> handler closes silently.
@@ -595,15 +595,15 @@ func TestCloseTearsDownActiveTunnel(t *testing.T) {
 	cfg := testConfig(addr, "127.0.0.1:0")
 	hp := proxy.NewHTTP(res, cfg)
 	go func() { _ = hp.ListenAndServe() }()
-	waitListen(t, addr).Close()
+	_ = waitListen(t, addr).Close()
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
 
 	// Open a CONNECT tunnel and confirm it is live (greeting relays back).
 	target := net.JoinHostPort(sni, upstream.port())
-	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	_, _ = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
 	if err != nil {
@@ -671,7 +671,7 @@ func TestCloseDrainsPromptlyWithActiveTunnels(t *testing.T) {
 	cfg := testConfig(addr, "127.0.0.1:0")
 	hp := proxy.NewHTTP(res, cfg)
 	go func() { _ = hp.ListenAndServe() }()
-	waitListen(t, addr).Close()
+	_ = waitListen(t, addr).Close()
 
 	var conns []net.Conn
 	for i := 0; i < 5; i++ {
@@ -679,7 +679,7 @@ func TestCloseDrainsPromptlyWithActiveTunnels(t *testing.T) {
 		conns = append(conns, c)
 		_ = c.SetDeadline(time.Now().Add(4 * time.Second))
 		target := net.JoinHostPort("h", upstream.port())
-		fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+		_, _ = fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 		_, _ = http.ReadResponse(bufio.NewReader(c), &http.Request{Method: http.MethodConnect})
 	}
 	defer func() {

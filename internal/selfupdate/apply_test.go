@@ -55,7 +55,7 @@ func updateServer(t *testing.T, tag string, archive []byte, sumHex string) (*htt
 	mux := http.NewServeMux()
 	mux.HandleFunc("/asset", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) })
 	mux.HandleFunc("/sums", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, "%s  %s\n", sumHex, assetName)
+		_, _ = fmt.Fprintf(w, "%s  %s\n", sumHex, assetName)
 	})
 	srv := httptest.NewServer(mux)
 	rel := release{

@@ -138,7 +138,7 @@ func (c *Checker) get(ctx context.Context, url string) (*http.Response, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("selfupdate: 다운로드 실패 (status %d)", resp.StatusCode)
 	}
 	return resp, nil
@@ -149,7 +149,7 @@ func (c *Checker) downloadChecksums(ctx context.Context, url string) (map[string
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	m := map[string]string{}
 	sc := bufio.NewScanner(io.LimitReader(resp.Body, 1<<20))
@@ -170,7 +170,7 @@ func (c *Checker) downloadBytes(ctx context.Context, url string, onProgress func
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	total := resp.ContentLength
 	// Reject an over-cap archive up front with a clear message. Without this the
@@ -219,7 +219,7 @@ func extractFromTarGz(data []byte, binName string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	tr := tar.NewReader(gz)
 	for {
 		h, err := tr.Next()
@@ -250,7 +250,7 @@ func extractFromZip(data []byte, binName string) ([]byte, error) {
 			return nil, err
 		}
 		b, err := io.ReadAll(io.LimitReader(rc, maxDownload))
-		rc.Close()
+		_ = rc.Close()
 		return b, err
 	}
 	return nil, ErrBinaryNotFound

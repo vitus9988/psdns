@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -31,16 +32,23 @@ const (
 // mistake that would stall every connection, so callers reject it up front.
 const MaxFragDelay = 5 * time.Second
 
+// MaxDoHHedgeDelay caps how long psdns waits before trying the next fallback
+// DoH endpoint. Large values are usually a configuration mistake because they
+// directly add DNS lookup latency when the primary endpoint is blocked.
+const MaxDoHHedgeDelay = 5 * time.Second
+
 // Config is the resolved runtime configuration.
 type Config struct {
-	DoHURL       string        // upstream DoH endpoint (RFC 8484)
-	DoHBootstrap string        // optional IP[:port] dialed for the DoH host (bypass system DNS)
-	DNSListen    string        // local DNS server listen address
-	ProxyListen  string        // HTTP CONNECT proxy listen address
-	SocksListen  string        // SOCKS5 proxy listen address
-	Frag         FragStrategy  // ClientHello fragmentation strategy
-	FragDelay    time.Duration // optional delay inserted between fragments
-	Timeout      time.Duration // dial / query timeout
+	DoHURL        string        // upstream DoH endpoint (RFC 8484)
+	DoHBootstrap  string        // optional IP[:port] dialed for the DoH host (bypass system DNS)
+	DoHFallbacks  []string      // optional fallback DoH endpoint URLs, tried with hedging
+	DoHHedgeDelay time.Duration // delay before starting each fallback DoH query
+	DNSListen     string        // local DNS server listen address
+	ProxyListen   string        // HTTP CONNECT proxy listen address
+	SocksListen   string        // SOCKS5 proxy listen address
+	Frag          FragStrategy  // ClientHello fragmentation strategy
+	FragDelay     time.Duration // optional delay inserted between fragments
+	Timeout       time.Duration // dial / query timeout
 
 	// SetSystemProxy makes the GUI point the OS web proxy (http+https) at the
 	// running HTTP proxy on start and restore it on stop/quit. GUI-only: the CLI
@@ -53,13 +61,14 @@ type Config struct {
 // no DNS bootstrap.
 func Default() Config {
 	return Config{
-		DoHURL:      "https://1.1.1.1/dns-query",
-		DNSListen:   "127.0.0.1:53",
-		ProxyListen: "127.0.0.1:8080",
-		SocksListen: "127.0.0.1:1080",
-		Frag:        FragSplit,
-		FragDelay:   0,
-		Timeout:     10 * time.Second,
+		DoHURL:        "https://1.1.1.1/dns-query",
+		DoHHedgeDelay: 250 * time.Millisecond,
+		DNSListen:     "127.0.0.1:53",
+		ProxyListen:   "127.0.0.1:8080",
+		SocksListen:   "127.0.0.1:1080",
+		Frag:          FragSplit,
+		FragDelay:     0,
+		Timeout:       10 * time.Second,
 
 		// Auto-configure the OS web proxy by default so the GUI's one button is
 		// enough; the GUI exposes a toggle to turn it off.
@@ -86,4 +95,26 @@ func ValidateBootstrap(bootstrap string) error {
 		return fmt.Errorf("bootstrap must be an IP literal: %q", bootstrap)
 	}
 	return nil
+}
+
+// ParseDoHList parses a comma-separated list of DoH endpoint URLs, trimming
+// whitespace and ignoring empty entries.
+func ParseDoHList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// FormatDoHList renders a DoH endpoint list in the same comma-separated form
+// accepted by ParseDoHList.
+func FormatDoHList(urls []string) string {
+	return strings.Join(urls, ",")
 }

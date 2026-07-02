@@ -116,7 +116,7 @@ func TestListenAndServeReleasesUDPOnTCPBindError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen tcp: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	addr := ln.Addr().String()
 
 	dohClient, err := doh.New("https://1.1.1.1/dns-query", "", time.Second)

@@ -75,7 +75,7 @@ func (s *Supervisor) Start(mode Mode) error {
 		return ErrInvalidMode
 	}
 
-	client, err := doh.New(s.cfg.DoHURL, s.cfg.DoHBootstrap, s.cfg.Timeout)
+	client, err := doh.NewExchanger(s.cfg.DoHURL, s.cfg.DoHBootstrap, s.cfg.DoHFallbacks, s.cfg.Timeout, s.cfg.DoHHedgeDelay)
 	if err != nil {
 		return err // bad endpoint URL — a config error worth showing inline
 	}
