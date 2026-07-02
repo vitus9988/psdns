@@ -64,6 +64,34 @@ func TestSNISplitOffsetNonClientHello(t *testing.T) {
 	}
 }
 
+// TestSNISplitOffsetNonHostNameEntry ensures a first ServerNameList entry whose
+// type is not host_name (0) — e.g. a GREASE or unknown entry — is not
+// misinterpreted: name_len must not be read from the wrong offset. The parser
+// reports ok=false so the caller uses the fixed fallback offset instead of
+// splitting at a bogus position.
+func TestSNISplitOffsetNonHostNameEntry(t *testing.T) {
+	name := []byte("blocked.example.com")
+	entry := []byte{0x01, byte(len(name) >> 8), byte(len(name))} // entry_type=1, NOT host_name
+	entry = append(entry, name...)
+	snList := append([]byte{byte(len(entry) >> 8), byte(len(entry))}, entry...)
+	ext := append([]byte{0x00, 0x00, byte(len(snList) >> 8), byte(len(snList))}, snList...)
+
+	body := []byte{0x03, 0x03}
+	body = append(body, make([]byte, 32)...)
+	body = append(body, 0x00)
+	body = append(body, 0x00, 0x02, 0x13, 0x01)
+	body = append(body, 0x01, 0x00)
+	body = append(body, byte(len(ext)>>8), byte(len(ext)))
+	body = append(body, ext...)
+	hs := []byte{0x01, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
+	hs = append(hs, body...)
+	rec := append([]byte{0x16, 0x03, 0x01, byte(len(hs) >> 8), byte(len(hs))}, hs...)
+
+	if _, ok := sniSplitOffset(rec); ok {
+		t.Fatalf("expected ok=false for a non-host_name first SNI entry")
+	}
+}
+
 func TestWriteSplitSeparatesSNI(t *testing.T) {
 	const sni = "blocked.example.com"
 	rec := buildClientHello(sni)
@@ -198,6 +226,50 @@ func TestSNISplitOffsetTruncatedDoesNotPanic(t *testing.T) {
 			t.Fatalf("truncation %d returned ok with out-of-range off %d", n, off)
 		}
 	}
+}
+
+// FuzzSNISplitOffset throws arbitrary and mutated ClientHello bytes at the SNI
+// parser. It must never panic, and any offset it reports as usable must be a
+// valid split point strictly inside the buffer (so callers can slice b[:off] /
+// b[off:] without an out-of-range panic).
+func FuzzSNISplitOffset(f *testing.F) {
+	f.Add(buildClientHello("blocked.example.com"))
+	f.Add(buildClientHello("a"))
+	f.Add([]byte{0x16, 0x03, 0x01, 0x00, 0x10})
+	f.Add([]byte("not a tls record at all"))
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		off, ok := sniSplitOffset(b)
+		if ok && (off <= 0 || off >= len(b)) {
+			t.Fatalf("ok offset %d out of split range for len %d", off, len(b))
+		}
+	})
+}
+
+// FuzzWriteFirstSplit fuzzes the whole split write path. It must never panic and
+// must be byte-preserving: the concatenation of the segments equals the input,
+// regardless of how malformed the input is.
+func FuzzWriteFirstSplit(f *testing.F) {
+	f.Add(buildClientHello("blocked.example.com"))
+	f.Add([]byte{0x16, 0x03, 0x01, 0x00, 0x10})
+	f.Add([]byte{0x16})
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		w := &recWriter{}
+		if err := WriteFirst(w, b, config.FragSplit, 0); err != nil {
+			t.Fatalf("WriteFirst: %v", err)
+		}
+		var merged []byte
+		for _, seg := range w.writes {
+			merged = append(merged, seg...)
+		}
+		if len(b) == 0 {
+			return
+		}
+		if !bytes.Equal(merged, b) {
+			t.Fatalf("split write is not byte-preserving: in %d bytes, out %d bytes", len(b), len(merged))
+		}
+	})
 }
 
 // TestWriteWithDelay exercises the inter-fragment delay branch of both strategies.

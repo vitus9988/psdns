@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -83,6 +85,25 @@ func TestFetchVerifiedBinary(t *testing.T) {
 	}
 	if !bytes.Equal(bin, content) {
 		t.Fatalf("extracted binary mismatch: got %q", bin)
+	}
+}
+
+// TestDownloadBytesRejectsOversized verifies an archive advertising a size over
+// the cap is rejected up front with a clear "too large" error rather than being
+// silently truncated (which would later surface as a confusing checksum mismatch).
+func TestDownloadBytesRejectsOversized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Advertise a size past the cap but send nothing: downloadBytes must
+		// reject on the declared Content-Length before reading the body.
+		w.Header().Set("Content-Length", strconv.FormatInt(int64(maxDownload)+1, 10))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewChecker(srv.Client())
+	_, err := c.downloadBytes(context.Background(), srv.URL, nil)
+	if err == nil || !strings.Contains(err.Error(), "너무 커요") {
+		t.Fatalf("want too-large error, got %v", err)
 	}
 }
 

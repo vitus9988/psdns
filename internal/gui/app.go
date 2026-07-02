@@ -35,6 +35,11 @@ const (
 	// updateCheckTimeout bounds both the silent startup update check and the
 	// manual "업데이트 확인" check.
 	updateCheckTimeout = 20 * time.Second
+	// applyTimeout bounds a full ApplyUpdate (metadata + checksums + archive
+	// download + extract + replace). It is generous because the archive is a few
+	// MB and the user may be on a slow link — the old bound was the shared HTTP
+	// client's 15s, which could abort a legitimate multi-MB download mid-stream.
+	applyTimeout = 5 * time.Minute
 )
 
 // App is the object bound to the Wails frontend.
@@ -72,7 +77,17 @@ func NewApp(version string) *App {
 	return &App{
 		version: version,
 		sup:     supervisor.New(config.Default()),
-		updater: selfupdate.NewChecker(&http.Client{Timeout: 15 * time.Second}),
+		// No fixed Client.Timeout: it would cap the whole request including the
+		// archive body read, which can legitimately exceed it on a slow link.
+		// Each call sets its own context deadline instead (updateCheckTimeout for
+		// checks, applyTimeout for ApplyUpdate); the transport timeouts below still
+		// catch a dead connection or a server that never sends headers.
+		updater: selfupdate.NewChecker(&http.Client{
+			Transport: &http.Transport{
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 15 * time.Second,
+			},
+		}),
 	}
 }
 
@@ -122,7 +137,9 @@ func (a *App) Shutdown(ctx context.Context) {
 	a.restoreSystemProxy()
 	a.stopTray()
 	if a.sup != nil {
-		_ = a.sup.Stop()
+		if err := a.sup.Stop(); err != nil {
+			log.Printf("gui: server shutdown: %v", err)
+		}
 	}
 	a.setRuntimeContext(nil)
 }
@@ -168,10 +185,17 @@ func (a *App) Start(mode string) (supervisor.State, error) {
 }
 
 // Stop tears down all servers. The system proxy is restored before the servers
-// go down so the OS is never left pointing at a closing listener.
+// go down so the OS is never left pointing at a closing listener. The restore
+// and the server teardown happen under sysproxyMu so they cannot interleave with
+// a maybeApplySystemProxy from a racing Start (Wails may dispatch Start and Stop
+// on separate goroutines): either the apply runs first and this restore undoes
+// it, or this teardown runs first and the apply sees Running==false and skips.
 func (a *App) Stop() (supervisor.State, error) {
-	a.restoreSystemProxy()
-	if err := a.sup.Stop(); err != nil {
+	a.sysproxyMu.Lock()
+	a.restoreSystemProxyLocked()
+	err := a.sup.Stop()
+	a.sysproxyMu.Unlock()
+	if err != nil {
 		return a.sup.Status(), err
 	}
 	return a.sup.Status(), nil
@@ -185,6 +209,9 @@ func (a *App) Stop() (supervisor.State, error) {
 func (a *App) maybeApplySystemProxy(st supervisor.State) {
 	if !a.sup.Config().SetSystemProxy {
 		return
+	}
+	if !sysproxy.Supported() {
+		return // no OS automation on this platform; the UI hides the toggle, so stay silent
 	}
 	var httpAddr string
 	for _, l := range st.Listeners {
@@ -202,6 +229,14 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 	}
 	a.sysproxyMu.Lock()
 	defer a.sysproxyMu.Unlock()
+	// Guard the Start/Stop race: Wails may dispatch a Stop on another goroutine
+	// during Start's settle delay. Stop takes sysproxyMu across its server
+	// teardown, so if it already ran, the servers are down by now — applying would
+	// point the OS proxy at a dead listener that this session would never restore
+	// (Stop's restore already ran and found nothing owed). Re-check under the lock.
+	if !a.sup.Status().Running {
+		return
+	}
 	// Mark the restore as owed before Apply touches the OS: Apply writes its
 	// backup first, so a partial apply failure (e.g. macOS admin refusal mid-way)
 	// must still be undone by this session's Stop/Shutdown, not left only for the
@@ -221,6 +256,13 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 func (a *App) restoreSystemProxy() {
 	a.sysproxyMu.Lock()
 	defer a.sysproxyMu.Unlock()
+	a.restoreSystemProxyLocked()
+}
+
+// restoreSystemProxyLocked is the body of restoreSystemProxy; the caller must
+// already hold sysproxyMu. Stop calls this directly so the restore and the
+// server teardown stay in one critical section (see Stop).
+func (a *App) restoreSystemProxyLocked() {
 	if !a.sysproxyOn {
 		return
 	}
@@ -231,6 +273,11 @@ func (a *App) restoreSystemProxy() {
 	a.sysproxyOn = false
 	a.emitSysProxy("restored", "시스템 프록시를 원래대로 되돌렸어요")
 }
+
+// SystemProxySupported reports whether OS web-proxy automation is available on
+// this platform, so the frontend can hide or disable the auto-set toggle where
+// it can never take effect (unsupported OS, or Linux without a graphical session).
+func (a *App) SystemProxySupported() bool { return sysproxy.Supported() }
 
 // emitSysProxy sends a sysproxy:* event (a toast) to the frontend. No-op when the
 // runtime context is gone (e.g. mid-shutdown).
@@ -268,7 +315,9 @@ func (a *App) CheckUpdate() (selfupdate.CheckResult, error) {
 // ApplyUpdate downloads, verifies, and installs the newest release, emitting
 // "update:progress" events, then restarts the app.
 func (a *App) ApplyUpdate() error {
-	err := a.updater.Apply(context.Background(), func(stage selfupdate.Stage, pct float64) {
+	ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
+	defer cancel()
+	err := a.updater.Apply(ctx, func(stage selfupdate.Stage, pct float64) {
 		if ctx := a.runtimeContext(); ctx != nil {
 			wruntime.EventsEmit(ctx, "update:progress", map[string]any{
 				"stage": string(stage), "pct": pct,

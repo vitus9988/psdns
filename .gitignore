@@ -32,3 +32,6 @@ go.work.sum
 # OS / editor cruft
 .DS_Store
 *~
+
+# oh-my-claudecode agent/session state
+/.omc/

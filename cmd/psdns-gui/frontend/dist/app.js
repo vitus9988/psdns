@@ -32,6 +32,7 @@
     SetConfig: async (c) => ({ config: c, warnings: [] }),
     CheckUpdate: async () => ({ current: "dev", latest: "", newer: false }),
     ApplyUpdate: async () => { throw "업데이트 자동 설치는 곧 제공될 예정이에요."; },
+    SystemProxySupported: async () => true,
     Quit: async () => {},
   };
 
@@ -447,6 +448,16 @@
       running = !!st.running;
       mode = st.mode || "proxy";
       lastState = st;
+      // Hide the system-proxy auto-config card on platforms where the OS
+      // automation can never take effect, so the user isn't offered a toggle
+      // whose only outcome is an error toast.
+      if (app.SystemProxySupported) {
+        try {
+          const supported = await app.SystemProxySupported();
+          const card = $("sysProxyCard");
+          if (card) card.hidden = !supported;
+        } catch (e) { /* older backend: leave the card visible */ }
+      }
     } catch (e) {
       showError("초기화에 실패했어요: " + String(e.message || e));
       ui = await mock.GetConfig();

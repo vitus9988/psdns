@@ -52,9 +52,9 @@ jobs:
       - name: go vet (excluding GUI cgo packages)
         shell: bash
         run: go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
-      - name: go test (excluding GUI cgo packages)
+      - name: go test -race (excluding GUI cgo packages)
         shell: bash
-        run: go test $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+        run: go test -race $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
 
   build-gui:
     name: build ${{ matrix.label }}

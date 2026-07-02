@@ -58,3 +58,17 @@ jobs:
           pkgs=$(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
           go test -race -covermode=atomic -coverprofile=coverage.out $pkgs
           go tool cover -func=coverage.out | tail -1
+      - name: Coverage threshold gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Floor set safely below current coverage (~66%): the gate catches a
+          # meaningful regression without churning on small fluctuations. Raise
+          # it as coverage grows.
+          min=60.0
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub(/%/,"",$NF); print $NF}')
+          echo "total coverage=${total}%  floor=${min}%"
+          if awk "BEGIN{exit !(${total} < ${min})}"; then
+            echo "::error::coverage ${total}% is below the ${min}% floor"
+            exit 1
+          fi

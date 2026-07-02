@@ -134,7 +134,7 @@ func (r *Resolver) lookup(ctx context.Context, host string) ([]net.IP, time.Dura
 
 	var (
 		mu       sync.Mutex
-		ips      []net.IP
+		v4, v6   []net.IP
 		ttl      uint32
 		haveTTL  bool
 		firstErr error
@@ -156,16 +156,14 @@ func (r *Resolver) lookup(ctx context.Context, host string) ([]net.IP, time.Dura
 			return
 		}
 		for _, rr := range resp.Answer {
-			var ip net.IP
 			switch v := rr.(type) {
 			case *dns.A:
-				ip = v.A
+				v4 = append(v4, v.A)
 			case *dns.AAAA:
-				ip = v.AAAA
+				v6 = append(v6, v.AAAA)
 			default:
 				continue
 			}
-			ips = append(ips, ip)
 			if t := rr.Header().Ttl; !haveTTL || t < ttl {
 				ttl = t
 				haveTTL = true
@@ -178,6 +176,11 @@ func (r *Resolver) lookup(ctx context.Context, host string) ([]net.IP, time.Dura
 	go func() { defer wg.Done(); query(dns.TypeA) }()
 	go func() { defer wg.Done(); query(dns.TypeAAAA) }()
 	wg.Wait()
+
+	// Merge IPv4 before IPv6 so the dial order is deterministic (the two queries
+	// race, so raw append order is not) and IPv4-first: on a host with broken
+	// IPv6 the reachable address is tried before the dead one.
+	ips := append(v4, v6...)
 
 	if len(ips) == 0 {
 		if firstErr != nil {

@@ -173,6 +173,13 @@ func (c *Checker) downloadBytes(ctx context.Context, url string, onProgress func
 	defer resp.Body.Close()
 
 	total := resp.ContentLength
+	// Reject an over-cap archive up front with a clear message. Without this the
+	// LimitReader below would silently truncate at maxDownload and the truncated
+	// bytes would fail the SHA-256 check, surfacing as a confusing "checksum
+	// mismatch" instead of "too large".
+	if total > maxDownload {
+		return nil, fmt.Errorf("selfupdate: 릴리즈 파일이 너무 커요 (%d바이트 > 최대 %d바이트)", total, int64(maxDownload))
+	}
 	var buf bytes.Buffer
 	body := io.LimitReader(resp.Body, maxDownload)
 	chunk := make([]byte, 64*1024)

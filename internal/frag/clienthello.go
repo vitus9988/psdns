@@ -73,6 +73,13 @@ func sniSplitOffset(b []byte) (int, bool) {
 			if len(sn) < 5 { // list_len(2) + entry_type(1) + name_len(2)
 				return 0, false
 			}
+			// The first ServerNameList entry must be a host_name (type 0). If it
+			// is not (a GREASE or unknown entry type), name_len at sn[3:5] would
+			// not describe a host name, so bail to the fixed fallback offset
+			// rather than split at a bogus position.
+			if sn[2] != 0 {
+				return 0, false
+			}
 			nameLen := int(binary.BigEndian.Uint16(sn[3:5]))
 			nameStart := 5
 			if nameStart+nameLen > len(sn) {

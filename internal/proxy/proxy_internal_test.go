@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vitus9988/psdns/internal/config"
 )
 
 // tlsRecord builds a TLS handshake record (content type 0x16) whose 2-byte
@@ -303,6 +305,74 @@ func TestConnTrackerCloseAllIdempotent(t *testing.T) {
 	tr.closeAll() // must not panic
 	if !tr.wait(time.Second) {
 		t.Fatal("empty tracker wait should return true immediately")
+	}
+}
+
+// FuzzReadFirstRecord throws arbitrary and truncated TLS-record-shaped bytes at
+// readFirstRecord. It must never panic and must never claim to have read more
+// bytes than the input held (the caller forwards exactly what it returns).
+func FuzzReadFirstRecord(f *testing.F) {
+	f.Add([]byte{0x16, 0x03, 0x01, 0x00, 0x02, 0xAB, 0xCD})
+	f.Add([]byte{0x16, 0x03, 0x01, 0xFF, 0xFF})
+	f.Add([]byte("GET / HTTP/1.1\r\n"))
+	f.Add([]byte{0x16, 0x03})
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		data, _ := readFirstRecord(bufio.NewReader(bytes.NewReader(b)))
+		if len(data) > len(b) {
+			t.Fatalf("returned %d bytes from a %d-byte input", len(data), len(b))
+		}
+	})
+}
+
+// TestRelayServerSpeaksFirstSurvivesQuietClient guards the fix for a
+// server-speaks-first protocol tunneled over CONNECT (SMTP/IMAP/SSH): the client
+// legitimately sends nothing until it sees the server greeting, so the
+// first-record read deadline fires with no ClientHello. The relay must NOT tear
+// the tunnel down on that timeout — it must deliver the server greeting and
+// forward the client's later bytes verbatim.
+func TestRelayServerSpeaksFirstSurvivesQuietClient(t *testing.T) {
+	proxyClient, extClient := net.Pipe()
+	proxyUp, extUp := net.Pipe()
+	defer extClient.Close()
+	defer extUp.Close()
+
+	cfg := config.Default()
+	cfg.Frag = config.FragNone
+	cfg.Timeout = 150 * time.Millisecond
+
+	go relay(proxyClient, proxyClient, proxyUp, cfg)
+
+	// The upstream (server) speaks first, before the client sends anything.
+	greeting := []byte("220 mail.example ESMTP\r\n")
+	go func() { _, _ = extUp.Write(greeting) }()
+
+	buf := make([]byte, len(greeting))
+	_ = extClient.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(extClient, buf); err != nil {
+		t.Fatalf("client did not receive server greeting: %v", err)
+	}
+	if !bytes.Equal(buf, greeting) {
+		t.Fatalf("greeting mismatch: %q", buf)
+	}
+
+	// Wait past the first-record read deadline, then the previously-silent client
+	// sends a command. Before the fix the relay would already have closed both
+	// conns, so this would never reach the upstream.
+	time.Sleep(cfg.Timeout + 100*time.Millisecond)
+	cmd := []byte("EHLO example\r\n")
+	go func() {
+		_ = extClient.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_, _ = extClient.Write(cmd)
+	}()
+
+	got := make([]byte, len(cmd))
+	_ = extUp.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(extUp, got); err != nil {
+		t.Fatalf("upstream did not receive client command after quiet period (tunnel torn down?): %v", err)
+	}
+	if !bytes.Equal(got, cmd) {
+		t.Fatalf("command mismatch: %q", got)
 	}
 }
 
