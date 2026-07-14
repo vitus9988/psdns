@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
 	"github.com/vitus9988/psdns/internal/resolver"
@@ -176,17 +177,43 @@ func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Req
 		req.Header.Del("Proxy-Connection")
 		req.Header.Del("Proxy-Authorization")
 
-		if werr := req.Write(upstream); werr != nil {
+		// A protocol upgrade (e.g. a plain ws:// WebSocket) stops being
+		// request/response after this exchange: forward the request, then splice
+		// both connections so the 101 reply and all framed bytes flow both ways.
+		// Without this the handler would read one response and close the upstream,
+		// killing the WebSocket.
+		if isUpgradeRequest(req) {
+			_ = upstream.SetWriteDeadline(time.Now().Add(p.cfg.Timeout))
+			werr := req.Write(upstream)
+			_ = upstream.SetWriteDeadline(time.Time{})
+			if werr != nil {
+				_ = upstream.Close()
+				return
+			}
+			tunnelPlain(br, client, upstream)
+			return
+		}
+
+		// Bound the request write and the response-header read so a connected but
+		// silent origin cannot hang the handler indefinitely. The deadline is
+		// cleared before copying the body so a legitimately slow or streaming
+		// response is not truncated.
+		_ = upstream.SetWriteDeadline(time.Now().Add(p.cfg.Timeout))
+		werr := req.Write(upstream)
+		_ = upstream.SetWriteDeadline(time.Time{})
+		if werr != nil {
 			_ = upstream.Close()
 			return
 		}
 
+		_ = upstream.SetReadDeadline(time.Now().Add(p.cfg.Timeout))
 		resp, rerr := http.ReadResponse(bufio.NewReader(upstream), req)
+		_ = upstream.SetReadDeadline(time.Time{})
 		if rerr != nil {
 			_ = upstream.Close()
 			return
 		}
-		werr := resp.Write(client)
+		werr = resp.Write(client)
 		_ = resp.Body.Close()
 		_ = upstream.Close()
 		if werr != nil {
@@ -199,6 +226,24 @@ func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Req
 		}
 		req = nil
 	}
+}
+
+// isUpgradeRequest reports whether req asks to switch protocols (e.g. a plain
+// WebSocket handshake): it carries an Upgrade header named by a "Connection:
+// Upgrade" token. Such a request is tunnelled raw rather than forwarded as a
+// single request/response pair.
+func isUpgradeRequest(req *http.Request) bool {
+	if req.Header.Get("Upgrade") == "" {
+		return false
+	}
+	for _, v := range req.Header.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hostPortFromRequest extracts the target host and port from a plaintext proxy

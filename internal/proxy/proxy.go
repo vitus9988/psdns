@@ -113,6 +113,31 @@ func relay(clientRead io.Reader, client, upstream net.Conn, cfg config.Config) {
 	closeBoth()
 }
 
+// tunnelPlain splices a plaintext client connection to its upstream in both
+// directions until either side closes, without touching the byte stream. It
+// backs plaintext HTTP Upgrade (e.g. a ws:// WebSocket handshake): once the
+// client asks to switch protocols the connection stops being request/response
+// pairs and becomes a raw tunnel carrying the 101 reply and all framed bytes.
+// Unlike relay it does no ClientHello fragmentation — plaintext carries no TLS.
+// clientRead is the buffered client reader (it may already hold pipelined bytes);
+// client is the raw conn used for the upstream→client direction and for closing.
+func tunnelPlain(clientRead io.Reader, client, upstream net.Conn) {
+	var once sync.Once
+	closeBoth := func() { once.Do(func() { _ = client.Close(); _ = upstream.Close() }) }
+
+	go func() {
+		defer closeBoth()
+		if _, err := io.Copy(upstream, clientRead); err != nil {
+			logRelayErr("client->upstream", err)
+		}
+	}()
+
+	if _, err := io.Copy(client, upstream); err != nil {
+		logRelayErr("upstream->client", err)
+	}
+	closeBoth()
+}
+
 // logRelayErr logs an unexpected relay error. Ending a relay closes both
 // connections, so EOF and use-of-closed-connection are the normal stop signals
 // and stay silent; anything else is surfaced to aid debugging.

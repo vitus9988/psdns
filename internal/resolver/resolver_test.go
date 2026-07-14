@@ -20,10 +20,11 @@ import (
 
 // answer describes what the mock DoH server returns for a single query type.
 type answer struct {
-	a     []dnsRR // records for an A query
-	aaaa  []dnsRR // records for an AAAA query
-	fail  bool    // respond 500 (forces a request error)
-	delay time.Duration
+	a         []dnsRR // records for an A query
+	aaaa      []dnsRR // records for an AAAA query
+	fail      bool    // respond 500 (forces a request error)
+	delay     time.Duration
+	aaaaDelay time.Duration // extra delay applied only to AAAA queries
 }
 
 type dnsRR struct {
@@ -53,6 +54,9 @@ func mockDoH(t testing.TB, ans answer) (*doh.Client, *int32) {
 		if err := q.Unpack(body); err != nil || len(q.Question) == 0 {
 			http.Error(w, "bad query", http.StatusBadRequest)
 			return
+		}
+		if ans.aaaaDelay > 0 && q.Question[0].Qtype == dns.TypeAAAA {
+			time.Sleep(ans.aaaaDelay)
 		}
 		if ans.fail {
 			http.Error(w, "boom", http.StatusInternalServerError)
@@ -229,6 +233,32 @@ func TestResolvePartialError(t *testing.T) {
 	}
 	if !ipStrings(ips)["1.2.3.4"] {
 		t.Fatalf("expected A address despite empty AAAA, got %v", ips)
+	}
+}
+
+// TestResolveSlowAAAADoesNotStall verifies a slow (or unanswered) AAAA query does
+// not hold up a name whose A record already resolved: Resolve returns the A
+// address well before the AAAA delay elapses (RFC 8305 Resolution Delay). Before
+// the fix, lookup waited for both families, so this would block ~2s.
+func TestResolveSlowAAAADoesNotStall(t *testing.T) {
+	c, _ := mockDoH(t, answer{
+		a:         []dnsRR{{ip: "1.2.3.4", ttl: 60}},
+		aaaa:      []dnsRR{{ip: "2001:db8::1", ttl: 60}},
+		aaaaDelay: 2 * time.Second,
+	})
+	r := resolver.New(c)
+
+	start := time.Now()
+	ips, err := r.Resolve(context.Background(), "slow.example.com")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !ipStrings(ips)["1.2.3.4"] {
+		t.Fatalf("expected A address, got %v", ips)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Resolve stalled on slow AAAA: took %v, want well under the 2s AAAA delay", elapsed)
 	}
 }
 

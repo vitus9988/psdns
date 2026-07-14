@@ -579,6 +579,78 @@ func pickPort(t *testing.T) string {
 	return addr
 }
 
+// TestHTTPPlainWebSocketUpgrade verifies that a plaintext HTTP Upgrade (ws://)
+// request is tunnelled: handlePlain forwards the request, relays the upstream's
+// 101 Switching Protocols reply, then splices bytes both ways instead of closing
+// after a single response. Before the fix it read one response and closed the
+// upstream, breaking the WebSocket.
+func TestHTTPPlainWebSocketUpgrade(t *testing.T) {
+	// Upstream that completes the handshake (101) then echoes frames back.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		ubr := bufio.NewReader(conn)
+		if _, err := http.ReadRequest(ubr); err != nil {
+			return
+		}
+		_, _ = io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_, _ = io.Copy(conn, ubr) // echo everything sent over the upgraded tunnel
+	}()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	res := mockResolver(t, "127.0.0.1")
+	addr := startHTTP(t, res)
+
+	conn := waitListen(t, addr)
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
+
+	// Send a plaintext WebSocket upgrade request in proxy (absolute-URI) form.
+	target := net.JoinHostPort("127.0.0.1", port)
+	_, _ = fmt.Fprintf(conn,
+		"GET http://%s/chat HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+		target, target)
+
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	if !bytes.Contains([]byte(statusLine), []byte(" 101 ")) {
+		t.Fatalf("status line = %q, want 101 Switching Protocols", statusLine)
+	}
+	for { // consume the rest of the response headers up to the blank line
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read headers: %v", err)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	// The tunnel is now raw: bytes sent after the upgrade must echo back.
+	const frame = "ping-frame-0123456789"
+	if _, err := io.WriteString(conn, frame); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+	got := make([]byte, len(frame))
+	if _, err := io.ReadFull(br, got); err != nil {
+		t.Fatalf("read echoed frame: %v", err)
+	}
+	if string(got) != frame {
+		t.Fatalf("echoed frame = %q, want %q", got, frame)
+	}
+}
+
 // TestCloseTearsDownActiveTunnel is the regression test for the "HTTP/2 protocol
 // error" seen after shutdown: Close() must shut down a live CONNECT tunnel (a
 // clean FIN to the client) instead of leaving it for the dying process to reset.

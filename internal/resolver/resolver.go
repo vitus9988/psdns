@@ -128,57 +128,118 @@ func (r *Resolver) storeLocked(key string, e entry, now time.Time) {
 	r.cache[key] = e
 }
 
-// lookup queries A and AAAA concurrently over DoH and merges the answers.
+// resolutionDelay bounds how long lookup waits for the second address family
+// once the first has already returned usable addresses (RFC 8305 §3 "Resolution
+// Delay"). A dual-stack host still returns both A and AAAA in the common case,
+// but a slow or unanswered AAAA can no longer stall a name whose A already
+// resolved — a stall that, with all traffic forced through the proxy, shows up as
+// a normally-working site hanging for the full timeout.
+const resolutionDelay = 50 * time.Millisecond
+
+// familyResult is one address family's answer from the DoH upstream.
+type familyResult struct {
+	qtype   uint16
+	ips     []net.IP
+	ttl     uint32
+	haveTTL bool
+	err     error
+}
+
+// lookup queries A and AAAA concurrently over DoH and merges the answers IPv4
+// first. It returns as soon as one family yields addresses, waiting only
+// resolutionDelay for the other, so a hung query for one family cannot hold up a
+// name the other already resolved. An error is returned only when neither family
+// produced any address (both empty or both failed).
 func (r *Resolver) lookup(ctx context.Context, host string) ([]net.IP, time.Duration, error) {
 	fqdn := dns.Fqdn(host)
 
-	var (
-		mu       sync.Mutex
-		v4, v6   []net.IP
-		ttl      uint32
-		haveTTL  bool
-		firstErr error
-	)
-
-	query := func(qtype uint16) {
+	query := func(qtype uint16) familyResult {
 		m := new(dns.Msg)
 		m.SetQuestion(fqdn, qtype)
 		m.RecursionDesired = true
 		m.SetEdns0(4096, false) // advertise a larger UDP buffer to the upstream
 		resp, err := r.doh.Exchange(ctx, m)
-
-		mu.Lock()
-		defer mu.Unlock()
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			return
+			return familyResult{qtype: qtype, err: err}
 		}
+		res := familyResult{qtype: qtype}
 		for _, rr := range resp.Answer {
 			switch v := rr.(type) {
 			case *dns.A:
-				v4 = append(v4, v.A)
+				res.ips = append(res.ips, v.A)
 			case *dns.AAAA:
-				v6 = append(v6, v.AAAA)
+				res.ips = append(res.ips, v.AAAA)
 			default:
 				continue
 			}
-			if t := rr.Header().Ttl; !haveTTL || t < ttl {
-				ttl = t
-				haveTTL = true
+			if t := rr.Header().Ttl; !res.haveTTL || t < res.ttl {
+				res.ttl = t
+				res.haveTTL = true
 			}
+		}
+		return res
+	}
+
+	// Buffered so a family that arrives after we have already returned can still
+	// deliver its result and its goroutine exit without leaking.
+	ch := make(chan familyResult, 2)
+	go func() { ch <- query(dns.TypeA) }()
+	go func() { ch <- query(dns.TypeAAAA) }()
+
+	var (
+		v4, v6   []net.IP
+		ttl      uint32
+		haveTTL  bool
+		firstErr error
+	)
+	merge := func(res familyResult) {
+		if res.err != nil {
+			if firstErr == nil {
+				firstErr = res.err
+			}
+			return
+		}
+		if res.qtype == dns.TypeA {
+			v4 = append(v4, res.ips...)
+		} else {
+			v6 = append(v6, res.ips...)
+		}
+		if res.haveTTL && (!haveTTL || res.ttl < ttl) {
+			ttl = res.ttl
+			haveTTL = true
 		}
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); query(dns.TypeA) }()
-	go func() { defer wg.Done(); query(dns.TypeAAAA) }()
-	wg.Wait()
+	// Wait for the first family to return.
+	select {
+	case res := <-ch:
+		merge(res)
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	}
+
+	// If it produced addresses, wait only a short grace period for the other
+	// family; otherwise wait for it unconditionally (we have nothing yet).
+	if len(v4)+len(v6) > 0 {
+		timer := time.NewTimer(resolutionDelay)
+		defer timer.Stop()
+		select {
+		case res := <-ch:
+			merge(res)
+		case <-timer.C:
+		case <-ctx.Done():
+		}
+	} else {
+		select {
+		case res := <-ch:
+			merge(res)
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		}
+	}
 
 	// Merge IPv4 before IPv6 so the dial order is deterministic (the two queries
-	// race, so raw append order is not) and IPv4-first: on a host with broken
+	// race, so raw arrival order is not) and IPv4-first: on a host with broken
 	// IPv6 the reachable address is tried before the dead one.
 	ips := append(v4, v6...)
 
