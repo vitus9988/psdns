@@ -26,3 +26,12 @@
   4. `main` 에서 `vX.Y.Z`(접미사 없는) 태그를 달아 **정식 릴리즈**한다. → 정식 태그 게시 후 `release.yml` 의 정리 스텝(`if: !contains(ref_name,'-')`)이 그 버전의 `vX.Y.Z-rc.*` 프리릴리즈/태그를 `GITHUB_TOKEN`(`contents: write`)으로 **자동 삭제**한다(rc 는 일회용이라 정식이 대체하면 폐기). 이 정리는 CI 에서 일어나므로 로컬 `gh` 인증이나 `release-main.sh` 실행에 의존하지 않는다 — `release-main.sh` 는 무엇이 정리될지 표시만 하고 직접 삭제하지 않는다.
 - **버전 규칙:** `-` 가 들어간 태그(`-rc.N`)는 프리릴리즈로 게시되며 자동 업데이트 대상에서 제외된다(`/releases/latest` 가 프리릴리즈를 빼고, `internal/selfupdate` 도 안정 빌드에 프리릴리즈를 제안하지 않음 — 이중 안전장치). 접미사 없는 `vX.Y.Z` 만 모든 사용자에게 자동 업데이트로 제안된다. **따라서 `-rc` 와 최종 태그를 헷갈리지 말 것.**
 - `main` 보호(PR 필수·`ci.yml` 통과 필수)는 GitHub 저장소 설정이라 코드로 강제되지 않는다 — 별도 수동 설정 권장.
+
+<!-- graphify:managed -->
+## graphify
+
+이 저장소는 graphify 코드 지식 그래프를 쓴다. 결과물은 `graphify-out/`(gitignore).
+
+- 아키텍처/코드 질문 전 `graphify-out/GRAPH_REPORT.md` 의 god node·community 구조를 확인.
+- pre-commit 훅이 커밋 시 `graphify update .` 로 자동 갱신(AST-only, 토큰 0).
+- 대규모 리팩터(코드 삭제 다수) 후 수동: `graphify update . --force`.

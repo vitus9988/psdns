@@ -32,6 +32,7 @@ go.work.sum
 # OS / editor cruft
 .DS_Store
 *~
+graphify-out/
 
 # oh-my-claudecode agent/session state
 /.omc/
