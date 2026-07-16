@@ -26,23 +26,36 @@ var version = "dev"
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// logFatal is a test seam; in production it is exactly log.Fatal.
+var logFatal = log.Fatal
+
 func main() {
-	if handled, err := relaunch.Run(os.Args[1:]); handled {
-		if err != nil {
-			log.Fatal(err)
-		}
-		return
+	if err := run(os.Args[1:]); err != nil {
+		logFatal(err)
 	}
+}
 
-	// Keep the display version and the self-update version in sync when only one
-	// was injected at build time.
+// run is main's body behind a testable boundary: the relaunch-helper handoff
+// and version plumbing can run under a test, while the Wails launch itself
+// cannot.
+func run(args []string) error {
+	if handled, err := relaunch.Run(args); handled {
+		return err
+	}
+	return wails.Run(appOptions(gui.NewApp(displayVersion())))
+}
+
+// displayVersion keeps the display version and the self-update version in sync
+// when only one was injected at build time.
+func displayVersion() string {
 	if version == "dev" && selfupdate.Version != "dev" {
-		version = selfupdate.Version
+		return selfupdate.Version
 	}
+	return version
+}
 
-	app := gui.NewApp(version)
-
-	err := wails.Run(&options.App{
+func appOptions(app *gui.App) *options.App {
+	return &options.App{
 		Title:            "psdns",
 		Width:            480,
 		Height:           860,
@@ -63,8 +76,5 @@ func main() {
 			Appearance:           mac.DefaultAppearance,
 			WebviewIsTransparent: false,
 		},
-	})
-	if err != nil {
-		log.Fatal(err)
 	}
 }

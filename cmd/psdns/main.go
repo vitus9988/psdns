@@ -37,11 +37,22 @@ var version = "dev"
 // docs/measurements.md), not part of the bypass path.
 var pprofAddr string
 
+// Test seams. In production these are exactly log.Fatal/log.Fatalf/os.Exit
+// (never returning); tests override them with panicking stand-ins so the
+// long-running subcommands can be driven in-process without killing the test
+// binary. Overrides MUST NOT return normally — callers rely on no-return.
+var (
+	logFatal  = log.Fatal
+	logFatalf = log.Fatalf
+	osExit    = os.Exit
+)
+
 func main() {
 	log.SetFlags(log.LstdFlags)
 	if len(os.Args) < 2 {
 		usage()
-		os.Exit(2)
+		osExit(2)
+		return
 	}
 	args := os.Args[2:]
 	switch os.Args[1] {
@@ -62,7 +73,7 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
 		usage()
-		os.Exit(2)
+		osExit(2)
 	}
 }
 
@@ -135,7 +146,7 @@ func checkDoHHedgeDelay(d time.Duration) error {
 func mustDoH(c *config.Config) doh.Exchanger {
 	client, err := doh.NewExchanger(c.DoHURL, c.DoHBootstrap, c.DoHFallbacks, c.Timeout, c.DoHHedgeDelay)
 	if err != nil {
-		log.Fatalf("doh client: %v", err)
+		logFatalf("doh client: %v", err)
 	}
 	return client
 }
@@ -180,7 +191,7 @@ func runResolve(args []string) {
 	fs.StringVar(&c.DNSListen, "listen", c.DNSListen, "local DNS listen address")
 	_ = fs.Parse(args)
 	if err := finalize(c, *fragStr, *fallbacksStr); err != nil {
-		log.Fatal(err)
+		logFatal(err)
 	}
 	maybeStartPprof()
 
@@ -188,7 +199,7 @@ func runResolve(args []string) {
 	go onSignal(srv.Shutdown)
 	log.Printf("psdns resolve: DNS on %s -> DoH %s", c.DNSListen, dohSummary(c))
 	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("dns server: %v", err)
+		logFatalf("dns server: %v", err)
 	}
 }
 
@@ -199,7 +210,7 @@ func runProxy(args []string) {
 	fs.StringVar(&c.SocksListen, "socks", c.SocksListen, "SOCKS5 proxy listen address")
 	_ = fs.Parse(args)
 	if err := finalize(c, *fragStr, *fallbacksStr); err != nil {
-		log.Fatal(err)
+		logFatal(err)
 	}
 	maybeStartPprof()
 
@@ -213,7 +224,7 @@ func runProxy(args []string) {
 	go onSignal(func() { _ = hp.Close(); _ = sp.Close() })
 	log.Printf("psdns proxy: HTTP %s | SOCKS5 %s | frag=%s -> DoH %s", c.ProxyListen, c.SocksListen, c.Frag, dohSummary(c))
 	go notifyUpdate()
-	log.Fatal(<-errCh)
+	logFatal(<-errCh)
 }
 
 func runAll(args []string) {
@@ -224,7 +235,7 @@ func runAll(args []string) {
 	fs.StringVar(&c.SocksListen, "socks", c.SocksListen, "SOCKS5 proxy listen address")
 	_ = fs.Parse(args)
 	if err := finalize(c, *fragStr, *fallbacksStr); err != nil {
-		log.Fatal(err)
+		logFatal(err)
 	}
 	maybeStartPprof()
 
@@ -241,7 +252,7 @@ func runAll(args []string) {
 	go onSignal(func() { dsrv.Shutdown(); _ = hp.Close(); _ = sp.Close() })
 	log.Printf("psdns run: DNS %s | HTTP %s | SOCKS5 %s | frag=%s -> DoH %s", c.DNSListen, c.ProxyListen, c.SocksListen, c.Frag, dohSummary(c))
 	go notifyUpdate()
-	log.Fatal(<-errCh)
+	logFatal(<-errCh)
 }
 
 // onSignal blocks until SIGINT/SIGTERM, runs stop, then exits.
@@ -251,7 +262,7 @@ func onSignal(stop func()) {
 	<-ch
 	log.Println("shutting down...")
 	stop()
-	os.Exit(0)
+	osExit(0)
 }
 
 func usage() {
