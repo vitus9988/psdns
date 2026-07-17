@@ -42,6 +42,23 @@ const (
 	applyTimeout = 5 * time.Minute
 )
 
+// Test seams: production code calls these package vars, which unit tests swap
+// for fakes — the real implementations either mutate the OS web proxy
+// (sysproxy.*) or log.Fatal without a live Wails runtime context (wruntime.*),
+// so neither can run under `go test`. Defaults are the real implementations.
+var (
+	sysproxySupported     = sysproxy.Supported
+	sysproxyApply         = sysproxy.Apply
+	sysproxyRestore       = sysproxy.Restore
+	sysproxyRecoverStale  = sysproxy.RecoverStale
+	wailsEventsEmit       = wruntime.EventsEmit
+	wailsWindowHide       = wruntime.WindowHide
+	wailsWindowShow       = wruntime.WindowShow
+	wailsWindowUnminimise = wruntime.WindowUnminimise
+	wailsShow             = wruntime.Show
+	wailsQuit             = wruntime.Quit
+)
+
 // App is the object bound to the Wails frontend.
 type App struct {
 	version string
@@ -99,7 +116,7 @@ func (a *App) Startup(ctx context.Context) {
 	// A previous run may have crashed or been force-killed with the OS proxy
 	// still pointed at us; clean that up first so a fresh Start snapshots the
 	// real prior state. No-op on a clean start (no backup left behind).
-	if _, err := sysproxy.RecoverStale(); err != nil {
+	if _, err := sysproxyRecoverStale(); err != nil {
 		log.Printf("gui: stale system-proxy cleanup failed: %v", err)
 	}
 	bgCtx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
@@ -114,7 +131,7 @@ func (a *App) BeforeClose(ctx context.Context) (prevent bool) {
 	if !a.shouldPreventClose() {
 		return false
 	}
-	wruntime.WindowHide(ctx)
+	wailsWindowHide(ctx)
 	return true
 }
 
@@ -151,8 +168,8 @@ func (a *App) OnSecondInstance(_ options.SecondInstanceData) {
 	if ctx == nil {
 		return
 	}
-	wruntime.WindowUnminimise(ctx)
-	wruntime.Show(ctx)
+	wailsWindowUnminimise(ctx)
+	wailsShow(ctx)
 }
 
 func (a *App) backgroundCheck(ctx context.Context) {
@@ -161,7 +178,7 @@ func (a *App) backgroundCheck(ctx context.Context) {
 		return // offline, rate-limited, cancelled, or already up to date: stay quiet
 	}
 	if ctx := a.runtimeContext(); ctx != nil {
-		wruntime.EventsEmit(ctx, "update:available", res)
+		wailsEventsEmit(ctx, "update:available", res)
 	}
 }
 
@@ -210,7 +227,7 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 	if !a.sup.Config().SetSystemProxy {
 		return
 	}
-	if !sysproxy.Supported() {
+	if !sysproxySupported() {
 		return // no OS automation on this platform; the UI hides the toggle, so stay silent
 	}
 	var httpAddr string
@@ -242,7 +259,7 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 	// must still be undone by this session's Stop/Shutdown, not left only for the
 	// next launch's RecoverStale.
 	a.sysproxyOn = true
-	if err := sysproxy.Apply(s); err != nil {
+	if err := sysproxyApply(s); err != nil {
 		a.emitSysProxy("error", "시스템 프록시 자동 설정에 실패했어요. 아래 주소를 복사해 브라우저에 직접 넣어 주세요.")
 		return
 	}
@@ -266,7 +283,7 @@ func (a *App) restoreSystemProxyLocked() {
 	if !a.sysproxyOn {
 		return
 	}
-	if err := sysproxy.Restore(); err != nil {
+	if err := sysproxyRestore(); err != nil {
 		a.emitSysProxy("error", "시스템 프록시를 원래대로 되돌리지 못했어요. 네트워크 설정을 확인해 주세요.")
 		return
 	}
@@ -277,13 +294,13 @@ func (a *App) restoreSystemProxyLocked() {
 // SystemProxySupported reports whether OS web-proxy automation is available on
 // this platform, so the frontend can hide or disable the auto-set toggle where
 // it can never take effect (unsupported OS, or Linux without a graphical session).
-func (a *App) SystemProxySupported() bool { return sysproxy.Supported() }
+func (a *App) SystemProxySupported() bool { return sysproxySupported() }
 
 // emitSysProxy sends a sysproxy:* event (a toast) to the frontend. No-op when the
 // runtime context is gone (e.g. mid-shutdown).
 func (a *App) emitSysProxy(kind, msg string) {
 	if ctx := a.runtimeContext(); ctx != nil {
-		wruntime.EventsEmit(ctx, "sysproxy:"+kind, msg)
+		wailsEventsEmit(ctx, "sysproxy:"+kind, msg)
 	}
 }
 
@@ -319,7 +336,7 @@ func (a *App) ApplyUpdate() error {
 	defer cancel()
 	err := a.updater.Apply(ctx, func(stage selfupdate.Stage, pct float64) {
 		if ctx := a.runtimeContext(); ctx != nil {
-			wruntime.EventsEmit(ctx, "update:progress", map[string]any{
+			wailsEventsEmit(ctx, "update:progress", map[string]any{
 				"stage": string(stage), "pct": pct,
 			})
 		}
@@ -344,7 +361,7 @@ func (a *App) restart() {
 	}
 	if err != nil {
 		if ctx := a.runtimeContext(); ctx != nil {
-			wruntime.EventsEmit(ctx, "update:error",
+			wailsEventsEmit(ctx, "update:error",
 				"업데이트는 적용됐지만 자동 재시작에 실패했어요. 앱을 직접 다시 실행해 주세요.")
 		}
 		return
@@ -362,7 +379,7 @@ func (a *App) Quit() {
 		_ = a.sup.Stop()
 	}
 	if ctx := a.runtimeContext(); ctx != nil {
-		wruntime.Quit(ctx)
+		wailsQuit(ctx)
 	}
 }
 

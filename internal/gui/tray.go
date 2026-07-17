@@ -15,7 +15,6 @@ import (
 	"runtime"
 
 	"github.com/energye/systray"
-	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 //go:embed icons/tray.png
@@ -23,6 +22,14 @@ var trayPNG []byte
 
 //go:embed icons/tray.ico
 var trayICO []byte
+
+// Test seams for the systray teardown/icon calls, mirroring the wails/sysproxy
+// seams in app.go: the real calls reach native tray state that does not exist
+// under `go test`. Defaults are the real implementations.
+var (
+	systrayQuit    = systray.Quit
+	systraySetIcon = systray.SetIcon
+)
 
 // startTray builds the tray icon and menu and starts systray. Safe to call from
 // Startup: it never blocks. See stopTray for the matching teardown.
@@ -77,17 +84,17 @@ func (a *App) stopTray() {
 		a.trayEnd()
 		return
 	}
-	systray.Quit()
+	systrayQuit()
 }
 
 // applyTrayIcon feeds systray the icon format it expects per OS: .ico on
 // Windows, .png elsewhere.
 func applyTrayIcon() {
 	if runtime.GOOS == "windows" {
-		systray.SetIcon(trayICO)
+		systraySetIcon(trayICO)
 		return
 	}
-	systray.SetIcon(trayPNG)
+	systraySetIcon(trayPNG)
 }
 
 // showWindow reveals the window after a hide-to-tray (or a minimise), reusing
@@ -97,7 +104,7 @@ func (a *App) showWindow() {
 	if ctx == nil {
 		return
 	}
-	wruntime.WindowShow(ctx)
-	wruntime.WindowUnminimise(ctx)
-	wruntime.Show(ctx)
+	wailsWindowShow(ctx)
+	wailsWindowUnminimise(ctx)
+	wailsShow(ctx)
 }
