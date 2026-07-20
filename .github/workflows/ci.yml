@@ -52,6 +52,17 @@ jobs:
       - name: go vet (excluding GUI cgo packages)
         shell: bash
         run: go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+      # Type-check sources AND tests for the other release OSes without running
+      # them. Catches unix-only symbols in test files (e.g. syscall.Kill) here on
+      # the test branch, instead of at tag time in release.yml's Windows job.
+      - name: go vet cross-OS (windows/darwin, excluding GUI cgo packages)
+        shell: bash
+        run: |
+          pkgs=$(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+          for goos in windows darwin; do
+            echo "== GOOS=${goos}"
+            GOOS="${goos}" go vet $pkgs
+          done
       - name: golangci-lint (excluding GUI cgo packages)
         uses: golangci/golangci-lint-action@v9
         with:
