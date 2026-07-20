@@ -12,6 +12,7 @@ import (
 	"net"
 	"runtime"
 	"strconv"
+	"strings"
 )
 
 // Settings is the proxy configuration to apply. Host/Port come from the live
@@ -62,6 +63,37 @@ func DefaultBypass() []string {
 // Supported reports whether system-proxy automation is available on this OS and
 // environment (e.g. a graphical session with gsettings on Linux).
 func Supported() bool { return supported() }
+
+// DetectedProxy is the web proxy the OS is configured to use right now, extracted
+// from a read-only snapshot. Enabled is true only when the OS currently routes
+// web traffic through Host:Port.
+type DetectedProxy struct {
+	Enabled bool
+	Host    string
+	Port    int
+}
+
+// Current returns the web proxy the OS is set to use at this moment. It makes no
+// changes (it only reads via capture), so it is safe to call before Apply to warn
+// about a conflicting local filtering proxy (e.g. AdGuard) that Apply would
+// otherwise overwrite.
+func Current() (DetectedProxy, error) {
+	b, err := capture()
+	if err != nil {
+		return DetectedProxy{}, err
+	}
+	return currentFromBackup(b), nil
+}
+
+// ConflictsWith reports whether d is a *different* loopback proxy than host:port —
+// i.e. another local filtering proxy that Apply would route around. A disabled
+// proxy, a non-loopback proxy, or our own address is not a conflict.
+func (d DetectedProxy) ConflictsWith(host string, port int) bool {
+	if !d.Enabled || !isLoopback(d.Host) {
+		return false
+	}
+	return !(strings.EqualFold(d.Host, host) && d.Port == port)
+}
 
 // Apply points the OS web proxy at s. The first call (no live backup on disk)
 // snapshots the current OS proxy state so Restore can put it back; a pre-existing

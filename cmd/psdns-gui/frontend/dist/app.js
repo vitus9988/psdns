@@ -439,6 +439,7 @@
       rt.EventsOn("sysproxy:applied", (m) => toast(m || "시스템 프록시를 자동으로 맞췄어요"));
       rt.EventsOn("sysproxy:restored", (m) => toast(m || "시스템 프록시를 원래대로 되돌렸어요"));
       rt.EventsOn("sysproxy:error", (m) => toast(m || "시스템 프록시 설정에 실패했어요"));
+      rt.EventsOn("sysproxy:conflict", (m) => toast(m || "다른 로컬 프록시와 충돌해 자동 설정을 건너뛰었어요"));
     }
   }
 

@@ -7,10 +7,13 @@ package gui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +54,7 @@ var (
 	sysproxyApply         = sysproxy.Apply
 	sysproxyRestore       = sysproxy.Restore
 	sysproxyRecoverStale  = sysproxy.RecoverStale
+	sysproxyCurrent       = sysproxy.Current
 	wailsEventsEmit       = wruntime.EventsEmit
 	wailsWindowHide       = wruntime.WindowHide
 	wailsWindowShow       = wruntime.WindowShow
@@ -252,6 +256,20 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 	// point the OS proxy at a dead listener that this session would never restore
 	// (Stop's restore already ran and found nothing owed). Re-check under the lock.
 	if !a.sup.Status().Running {
+		return
+	}
+	// Don't silently clobber another local filtering proxy (e.g. AdGuard): if the
+	// OS already routes web traffic through a *different* loopback proxy, applying
+	// would route around its filtering (its ad-blocking would stop working while
+	// psdns is on), so warn and skip. No backup is written and sysproxyOn stays
+	// false, so Stop/RecoverStale remain no-ops (no dead-proxy risk). A detection
+	// error is fail-open — Apply's own capture would surface the same failure. The
+	// user can turn off that app or the auto-set toggle and set psdns by hand.
+	if cur, derr := sysproxyCurrent(); derr == nil && cur.ConflictsWith(s.Host, s.Port) {
+		a.emitSysProxy("conflict", fmt.Sprintf(
+			"다른 로컬 프록시(%s)가 시스템 프록시로 설정돼 있어 자동 설정을 건너뛰었어요. "+
+				"그 앱(예: AdGuard)을 끄거나, '시스템 프록시 자동 설정'을 끄고 아래 주소를 직접 넣어 주세요.",
+			net.JoinHostPort(cur.Host, strconv.Itoa(cur.Port))))
 		return
 	}
 	// Mark the restore as owed before Apply touches the OS: Apply writes its

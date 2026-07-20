@@ -28,6 +28,100 @@ func formatProxyOverride(bypass []string) string {
 	return strings.Join(parts, ";")
 }
 
+// parseWinINETProxyServer extracts host:port from a WinINET ProxyServer value —
+// the reverse of formatProxyServer. It accepts the per-protocol form
+// ("http=h:p;https=h:p", preferring the https entry) and the bare "h:p" form that
+// applies to every protocol. ok is false when no host:port can be parsed.
+func parseWinINETProxyServer(v string) (host string, port int, ok bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", 0, false
+	}
+	if !strings.Contains(v, "=") {
+		return splitHostPort(v) // bare "h:p" for all protocols
+	}
+	// Per-protocol list: prefer https, then http, then the first parsable entry.
+	byProto := map[string]string{}
+	var firstHP string
+	for _, part := range strings.Split(v, ";") {
+		eq := strings.IndexByte(part, '=')
+		if eq < 0 {
+			continue
+		}
+		proto := strings.ToLower(strings.TrimSpace(part[:eq]))
+		hp := strings.TrimSpace(part[eq+1:])
+		byProto[proto] = hp
+		if firstHP == "" {
+			firstHP = hp
+		}
+	}
+	for _, proto := range []string{"https", "http"} {
+		if hp, exists := byProto[proto]; exists {
+			if h, p, valid := splitHostPort(hp); valid {
+				return h, p, true
+			}
+		}
+	}
+	return splitHostPort(firstHP)
+}
+
+// splitHostPort parses "host:port" into its parts, requiring a valid port.
+func splitHostPort(hp string) (host string, port int, ok bool) {
+	h, portStr, err := net.SplitHostPort(strings.TrimSpace(hp))
+	if err != nil {
+		return "", 0, false
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p <= 0 || p > 65535 {
+		return "", 0, false
+	}
+	return h, p, true
+}
+
+// isLoopback reports whether host is a loopback address or the "localhost" name.
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// currentFromBackup pulls the active web proxy out of a captured Backup, so the
+// GUI can detect a conflicting local proxy before overwriting it. Only the field
+// matching the current OS is populated. The https/secure entry is preferred over
+// plain http. Returns a disabled (empty) result when no proxy is active.
+func currentFromBackup(b Backup) DetectedProxy {
+	switch {
+	case b.Windows != nil:
+		if b.Windows.ProxyEnable != 1 {
+			return DetectedProxy{}
+		}
+		if h, p, ok := parseWinINETProxyServer(b.Windows.ProxyServer); ok {
+			return DetectedProxy{Enabled: true, Host: h, Port: p}
+		}
+	case b.Darwin != nil:
+		for _, s := range b.Darwin.Services {
+			if s.SecureEnabled && s.SecureServer != "" && s.SecurePort > 0 {
+				return DetectedProxy{Enabled: true, Host: s.SecureServer, Port: s.SecurePort}
+			}
+			if s.WebEnabled && s.WebServer != "" && s.WebPort > 0 {
+				return DetectedProxy{Enabled: true, Host: s.WebServer, Port: s.WebPort}
+			}
+		}
+	case b.Linux != nil:
+		if b.Linux.Mode == "manual" {
+			if b.Linux.HTTPSHost != "" && b.Linux.HTTPSPort > 0 {
+				return DetectedProxy{Enabled: true, Host: b.Linux.HTTPSHost, Port: b.Linux.HTTPSPort}
+			}
+			if b.Linux.HTTPHost != "" && b.Linux.HTTPPort > 0 {
+				return DetectedProxy{Enabled: true, Host: b.Linux.HTTPHost, Port: b.Linux.HTTPPort}
+			}
+		}
+	}
+	return DetectedProxy{}
+}
+
 // --- Linux (GNOME gsettings) ---
 
 // formatIgnoreHosts renders a bypass list as a GVariant string-array literal:

@@ -118,11 +118,14 @@ func TestMaybeApplySystemProxyUnsupported(t *testing.T) {
 func TestStartStopAppliesAndRestoresSystemProxy(t *testing.T) {
 	redirectConfigDir(t)
 	events := recordEvents(t)
-	prevSup, prevApply, prevRestore := sysproxySupported, sysproxyApply, sysproxyRestore
+	prevSup, prevApply, prevRestore, prevCur := sysproxySupported, sysproxyApply, sysproxyRestore, sysproxyCurrent
 	t.Cleanup(func() {
-		sysproxySupported, sysproxyApply, sysproxyRestore = prevSup, prevApply, prevRestore
+		sysproxySupported, sysproxyApply, sysproxyRestore, sysproxyCurrent = prevSup, prevApply, prevRestore, prevCur
 	})
 	sysproxySupported = func() bool { return true }
+	// No conflicting local proxy, so the apply path proceeds (and stays hermetic —
+	// the default would shell out to the OS to read the real proxy state).
+	sysproxyCurrent = func() (sysproxy.DetectedProxy, error) { return sysproxy.DetectedProxy{}, nil }
 	restored := 0
 	sysproxyRestore = func() error { restored++; return nil }
 
@@ -171,6 +174,49 @@ func TestStartStopAppliesAndRestoresSystemProxy(t *testing.T) {
 	}
 	if !slices.Contains(*events, "sysproxy:restored") || restored != 2 {
 		t.Fatalf("want sysproxy:restored toast (restored=%d), got %v", restored, *events)
+	}
+}
+
+// TestStartSkipsSystemProxyOnConflict covers the AdGuard-conflict guard: when the
+// OS already routes web traffic through a *different* loopback proxy, psdns must
+// not overwrite it — Apply is never called, no restore is owed, and a conflict
+// toast tells the user why.
+func TestStartSkipsSystemProxyOnConflict(t *testing.T) {
+	redirectConfigDir(t)
+	events := recordEvents(t)
+	prevSup, prevApply, prevRestore, prevCur := sysproxySupported, sysproxyApply, sysproxyRestore, sysproxyCurrent
+	t.Cleanup(func() {
+		sysproxySupported, sysproxyApply, sysproxyRestore, sysproxyCurrent = prevSup, prevApply, prevRestore, prevCur
+	})
+	sysproxySupported = func() bool { return true }
+	applied := false
+	sysproxyApply = func(sysproxy.Settings) error { applied = true; return nil }
+	sysproxyRestore = func() error { return nil }
+	// Another local filtering proxy (e.g. AdGuard on 127.0.0.1:3128) is already set.
+	sysproxyCurrent = func() (sysproxy.DetectedProxy, error) {
+		return sysproxy.DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 3128}, nil
+	}
+
+	a := NewApp("t")
+	a.setRuntimeContext(context.Background())
+	u := a.GetConfig() // SetSystemProxy stays on (the default)
+	u.ProxyListen, u.SocksListen = "127.0.0.1:0", "127.0.0.1:0"
+	if _, err := a.SetConfig(u); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if _, err := a.Start("proxy"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _, _ = a.Stop() })
+
+	if applied {
+		t.Fatal("must not overwrite an existing local proxy")
+	}
+	if a.sysproxyOn {
+		t.Fatal("a skipped apply must not owe a restore")
+	}
+	if !slices.Contains(*events, "sysproxy:conflict") {
+		t.Fatalf("want sysproxy:conflict toast, got %v", *events)
 	}
 }
 

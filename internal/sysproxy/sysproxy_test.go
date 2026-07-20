@@ -111,6 +111,99 @@ func TestParseGsettingsValue(t *testing.T) {
 	}
 }
 
+func TestParseWinINETProxyServer(t *testing.T) {
+	tests := []struct {
+		in       string
+		wantHost string
+		wantPort int
+		wantOK   bool
+	}{
+		{"http=127.0.0.1:8080;https=127.0.0.1:8080", "127.0.0.1", 8080, true},
+		{"http=127.0.0.1:8080;https=127.0.0.1:9090", "127.0.0.1", 9090, true}, // https preferred
+		{"http=127.0.0.1:8080", "127.0.0.1", 8080, true},                      // only http present
+		{"127.0.0.1:1080", "127.0.0.1", 1080, true},                           // bare form (all protocols)
+		{"[::1]:8080", "::1", 8080, true},                                     // bare IPv6
+		{"ftp=127.0.0.1:2121", "127.0.0.1", 2121, true},                       // unknown proto -> first parsable
+		{"", "", 0, false},
+		{"garbage", "", 0, false},
+		{"https=127.0.0.1:0", "", 0, false}, // invalid port
+	}
+	for _, tc := range tests {
+		h, p, ok := parseWinINETProxyServer(tc.in)
+		if ok != tc.wantOK || h != tc.wantHost || p != tc.wantPort {
+			t.Errorf("parseWinINETProxyServer(%q) = %q,%d,%v; want %q,%d,%v",
+				tc.in, h, p, ok, tc.wantHost, tc.wantPort, tc.wantOK)
+		}
+	}
+}
+
+func TestIsLoopback(t *testing.T) {
+	for _, h := range []string{"localhost", "LocalHost", "127.0.0.1", "127.0.0.5", "::1"} {
+		if !isLoopback(h) {
+			t.Errorf("isLoopback(%q) = false, want true", h)
+		}
+	}
+	for _, h := range []string{"10.0.0.1", "192.168.1.2", "example.com", ""} {
+		if isLoopback(h) {
+			t.Errorf("isLoopback(%q) = true, want false", h)
+		}
+	}
+}
+
+func TestCurrentFromBackup(t *testing.T) {
+	tests := []struct {
+		name string
+		b    Backup
+		want DetectedProxy
+	}{
+		{"empty", Backup{}, DetectedProxy{}},
+		{"windows disabled", Backup{Windows: &windowsBackup{ProxyEnable: 0, ProxyServer: "http=127.0.0.1:8080;https=127.0.0.1:8080"}}, DetectedProxy{}},
+		{"windows enabled", Backup{Windows: &windowsBackup{ProxyEnable: 1, ProxyServer: "http=127.0.0.1:8080;https=127.0.0.1:8080"}}, DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 8080}},
+		{"windows enabled bad server", Backup{Windows: &windowsBackup{ProxyEnable: 1, ProxyServer: ""}}, DetectedProxy{}},
+		{"darwin secure preferred", Backup{Darwin: &darwinBackup{Services: []darwinService{
+			{Name: "Wi-Fi", WebEnabled: true, WebServer: "127.0.0.1", WebPort: 7000, SecureEnabled: true, SecureServer: "127.0.0.1", SecurePort: 8080},
+		}}}, DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 8080}},
+		{"darwin web only", Backup{Darwin: &darwinBackup{Services: []darwinService{
+			{Name: "Wi-Fi", WebEnabled: true, WebServer: "127.0.0.1", WebPort: 7000},
+		}}}, DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 7000}},
+		{"darwin none enabled", Backup{Darwin: &darwinBackup{Services: []darwinService{
+			{Name: "Wi-Fi"},
+		}}}, DetectedProxy{}},
+		{"linux manual https", Backup{Linux: &linuxBackup{Mode: "manual", HTTPHost: "127.0.0.1", HTTPPort: 7000, HTTPSHost: "127.0.0.1", HTTPSPort: 8080}}, DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 8080}},
+		{"linux manual http only", Backup{Linux: &linuxBackup{Mode: "manual", HTTPHost: "127.0.0.1", HTTPPort: 7000}}, DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 7000}},
+		{"linux mode none", Backup{Linux: &linuxBackup{Mode: "none", HTTPSHost: "127.0.0.1", HTTPSPort: 8080}}, DetectedProxy{}},
+	}
+	for _, tc := range tests {
+		if got := currentFromBackup(tc.b); got != tc.want {
+			t.Errorf("currentFromBackup(%s) = %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDetectedProxyConflictsWith(t *testing.T) {
+	ours := struct {
+		host string
+		port int
+	}{"127.0.0.1", 8080}
+	tests := []struct {
+		name string
+		d    DetectedProxy
+		want bool
+	}{
+		{"disabled", DetectedProxy{Enabled: false, Host: "127.0.0.1", Port: 9999}, false},
+		{"non-loopback", DetectedProxy{Enabled: true, Host: "10.0.0.1", Port: 3128}, false},
+		{"our own address", DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 8080}, false},
+		{"other loopback port", DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 9090}, true},
+		{"other loopback host", DetectedProxy{Enabled: true, Host: "::1", Port: 8080}, true},
+		{"localhost name", DetectedProxy{Enabled: true, Host: "localhost", Port: 9090}, true},
+	}
+	for _, tc := range tests {
+		if got := tc.d.ConflictsWith(ours.host, ours.port); got != tc.want {
+			t.Errorf("%s: ConflictsWith = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestBackupRoundTrip(t *testing.T) {
 	b := Backup{
 		Version:      backupVersion,
