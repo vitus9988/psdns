@@ -106,6 +106,22 @@ jobs:
           go test -race -covermode=atomic -coverprofile=coverage.out $pkgs
           go tool cover -func=coverage.out | tail -1
 
+      - name: Coverage threshold gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Mirrors ci.yml's gate so a coverage regression cannot slip through a
+          # tag-triggered release that skipped the PR gate. The 86% floor clears
+          # the lowest matrix OS (Windows, where sysproxy_windows.go is not yet
+          # tested); raise it in lockstep with ci.yml once that gap is closed.
+          min=86.0
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub(/%/,"",$NF); print $NF}')
+          echo "total coverage=${total}%  floor=${min}%"
+          if awk "BEGIN{exit !(${total} < ${min})}"; then
+            echo "::error::coverage ${total}% is below the ${min}% floor"
+            exit 1
+          fi
+
       - name: Import Apple Developer ID certificate
         if: matrix.label == 'macos' && env.MACOS_SIGN_IDENTITY != ''
         run: |

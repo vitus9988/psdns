@@ -78,13 +78,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Floor set safely below current coverage (~66%): the gate catches a
-          # meaningful regression without churning on small fluctuations. Raise
-          # it as coverage grows.
-          min=60.0
+          # Current coverage is ~92% on macOS and ~89-90% here on Linux — the gap
+          # is the OS-specific sysproxy file (sysproxy_linux.go / _windows.go) that
+          # is compiled but not yet exercised (only the pure parsers in format.go
+          # are). The 86% floor sits safely below the lowest matrix OS (~88% on the
+          # Windows release runner) so it catches a real regression without a false
+          # failure from that per-OS gap. Raise toward 90% once the Windows/Linux
+          # sysproxy paths get OS-gated tests.
+          min=86.0
           total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub(/%/,"",$NF); print $NF}')
           echo "total coverage=${total}%  floor=${min}%"
           if awk "BEGIN{exit !(${total} < ${min})}"; then
             echo "::error::coverage ${total}% is below the ${min}% floor"
             exit 1
           fi
+
+  # The GUI cgo packages are excluded from the checks job above (they need a
+  # native toolchain), so vet/test them here on macOS and Windows — where the
+  # tray (systray) and webview (Wails) native deps ship with the OS, needing no
+  # apt install. Linux GUI needs libgtk/libwebkit2gtk/libayatana-appindicator3
+  # and is validated at release time by release.yml's build-gui job instead.
+  gui:
+    name: gui vet + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet (GUI cgo packages)
+        shell: bash
+        run: go vet ./internal/gui/... ./cmd/psdns-gui/...
+      - name: go test -race (GUI cgo packages)
+        shell: bash
+        run: go test -race ./internal/gui/... ./cmd/psdns-gui/...
