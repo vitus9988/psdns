@@ -92,7 +92,7 @@ func (d DetectedProxy) ConflictsWith(host string, port int) bool {
 	if !d.Enabled || !isLoopback(d.Host) {
 		return false
 	}
-	return !(strings.EqualFold(d.Host, host) && d.Port == port)
+	return !strings.EqualFold(d.Host, host) || d.Port != port
 }
 
 // Apply points the OS web proxy at s. The first call (no live backup on disk)

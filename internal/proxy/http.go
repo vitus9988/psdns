@@ -8,27 +8,26 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
 	"github.com/vitus9988/psdns/internal/resolver"
 )
 
-// HTTPProxy is an HTTP CONNECT proxy (HTTPS tunnelling) with SNI-bypass.
+// HTTPProxy is an HTTP CONNECT proxy (HTTPS tunnelling) with SNI-bypass. It also
+// forwards plaintext (non-CONNECT) requests. The listener lifecycle (Serve,
+// Close) is the embedded server; only handle is HTTP-specific.
 type HTTPProxy struct {
+	server
 	res *resolver.Resolver
 	cfg config.Config
-
-	mu     sync.Mutex
-	ln     net.Listener
-	closed bool
-	track  connTracker
 }
 
 // NewHTTP creates an HTTP CONNECT proxy.
 func NewHTTP(res *resolver.Resolver, cfg config.Config) *HTTPProxy {
-	return &HTTPProxy{res: res, cfg: cfg}
+	p := &HTTPProxy{res: res, cfg: cfg}
+	p.onConn = p.handle
+	return p
 }
 
 // ListenAndServe binds cfg.ProxyListen and serves until the listener is closed.
@@ -40,56 +39,6 @@ func (p *HTTPProxy) ListenAndServe() error {
 		return err
 	}
 	return p.Serve(ln)
-}
-
-// Serve accepts connections on ln until it is closed via Close. Serve adopts ln
-// (Close shuts it down) and is safe to call Close before or concurrently with
-// Serve. The GUI supervisor uses Serve directly so it can bind with port
-// fallback and report the actual bound address.
-func (p *HTTPProxy) Serve(ln net.Listener) error {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		_ = ln.Close()
-		return net.ErrClosed
-	}
-	p.ln = ln
-	p.mu.Unlock()
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return err
-		}
-		if !p.track.add(conn) { // Close is already running: don't serve a doomed conn
-			_ = conn.Close()
-			continue
-		}
-		go func() {
-			defer p.track.remove(conn)
-			p.handle(conn)
-		}()
-	}
-}
-
-// Close stops the listener and shuts down every live connection so in-flight
-// CONNECT tunnels end with a clean FIN instead of dying abruptly with the
-// process (which breaks a browser's HTTP/2 session carried over the tunnel).
-// It is safe to call concurrently with (or before) ListenAndServe, and is
-// idempotent.
-func (p *HTTPProxy) Close() error {
-	p.mu.Lock()
-	p.closed = true
-	var err error
-	if p.ln != nil {
-		err = p.ln.Close()
-	}
-	p.mu.Unlock()
-
-	// Closing the client side wakes relay, whose closeBoth then closes the
-	// upstream too; drain briefly so the teardown flushes before we return.
-	p.track.closeAll()
-	p.track.wait(drainTimeout)
-	return err
 }
 
 func (p *HTTPProxy) handle(client net.Conn) {

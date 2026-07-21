@@ -49,7 +49,8 @@ func TestDisplayVersion(t *testing.T) {
 	}{
 		{"dev falls back to selfupdate", "dev", "v9.9.9", "v9.9.9"},
 		{"both dev stays dev", "dev", "dev", "dev"},
-		{"injected version wins", "v1.2.3", "v0.0.1", "v1.2.3"},
+		{"selfupdate version is authoritative", "v1.2.3", "v0.0.1", "v0.0.1"},
+		{"main.version only a dev-display fallback", "v1.2.3-dev", "dev", "v1.2.3-dev"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -18,9 +18,11 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 )
 
-// version is the release version, injected at build time via
-// -ldflags "-X main.version=...". The self-update logic reads its own copy from
-// internal/selfupdate.Version (also injected); this one is for display.
+// version is a display-only fallback, injected at build time via
+// -ldflags "-X main.version=...". selfupdate.Version is the single source of
+// truth for the running version (update checks compare against it), so
+// displayVersion prefers it; this is used only when self-update is disabled
+// (e.g. a dev build that still wants a richer git-describe string on screen).
 var version = "dev"
 
 //go:embed all:frontend/dist
@@ -45,10 +47,13 @@ func run(args []string) error {
 	return wails.Run(appOptions(gui.NewApp(displayVersion())))
 }
 
-// displayVersion keeps the display version and the self-update version in sync
-// when only one was injected at build time.
+// displayVersion returns the version to show in the UI. selfupdate.Version is
+// authoritative — it is what update checks compare against — so display follows
+// it whenever it carries a real (injected) version, keeping the shown version
+// from diverging from the one updates act on. main.version is only a fallback
+// for a build that injects a display-only string while leaving self-update off.
 func displayVersion() string {
-	if version == "dev" && selfupdate.Version != "dev" {
+	if selfupdate.Version != "dev" {
 		return selfupdate.Version
 	}
 	return version

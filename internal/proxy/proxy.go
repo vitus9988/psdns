@@ -168,6 +168,68 @@ func readFirstRecord(r io.Reader) ([]byte, error) {
 	return append(hdr, body[:n]...), err
 }
 
+// server is the listener lifecycle shared by HTTPProxy and SOCKSProxy: it adopts
+// a listener in Serve, accepts connections into the connTracker, and tears
+// everything down gracefully in Close. Only the per-connection handling differs
+// between the two proxies, supplied as onConn. Embed it and set onConn in the
+// constructor. Every method is safe for concurrent use.
+type server struct {
+	mu     sync.Mutex
+	ln     net.Listener
+	closed bool
+	track  connTracker
+	onConn func(net.Conn) // per-protocol handler for one accepted connection
+}
+
+// Serve accepts connections on ln until it is closed via Close. Serve adopts ln
+// (Close shuts it down) and is safe to call Close before or concurrently with
+// Serve. The GUI supervisor uses Serve directly so it can bind with port
+// fallback and report the actual bound address.
+func (s *server) Serve(ln net.Listener) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = ln.Close()
+		return net.ErrClosed
+	}
+	s.ln = ln
+	s.mu.Unlock()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return err
+		}
+		if !s.track.add(conn) { // Close is already running: don't serve a doomed conn
+			_ = conn.Close()
+			continue
+		}
+		go func() {
+			defer s.track.remove(conn)
+			s.onConn(conn)
+		}()
+	}
+}
+
+// Close stops the listener and shuts down every live connection so in-flight
+// tunnels end with a clean FIN instead of dying abruptly with the process
+// (which breaks a browser's HTTP/2 session carried over the tunnel). It is safe
+// to call concurrently with (or before) Serve, and is idempotent.
+func (s *server) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	var err error
+	if s.ln != nil {
+		err = s.ln.Close()
+	}
+	s.mu.Unlock()
+
+	// Closing the client side wakes relay, whose closeBoth then closes the
+	// upstream too; drain briefly so the teardown flushes before we return.
+	s.track.closeAll()
+	s.track.wait(drainTimeout)
+	return err
+}
+
 // connTracker tracks live client connections so a closing proxy can shut them
 // down explicitly. Closing the client conn wakes relay's io.Copy, whose
 // closeBoth then tears down the matching upstream too, so tracking the client

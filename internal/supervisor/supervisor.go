@@ -170,6 +170,12 @@ func (s *Supervisor) Stop() error {
 		s.dns.Shutdown()
 	}
 	s.http, s.sock, s.dns = nil, nil, nil
+	// Drop the stale listener snapshot so Status stops reporting the (now
+	// Up:false) listeners of the run that just ended; the next Start allocates a
+	// fresh set. A serve goroutine still unwinding may set Up=false on its own
+	// *Listener after this, but that pointer is now orphaned so the write is
+	// harmless (and still guarded by s.mu).
+	s.listeners = map[string]*Listener{}
 	s.running = false
 	s.mode = ""
 	return nil
