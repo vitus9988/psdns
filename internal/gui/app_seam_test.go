@@ -55,17 +55,22 @@ func TestWindowRevealPaths(t *testing.T) {
 		wailsWindowShow, wailsWindowUnminimise, wailsShow = prevWShow, prevUnmin, prevShow
 	})
 
+	// Both paths must run the full reveal sequence, WindowShow first: after a
+	// hide-to-tray (BeforeClose → WindowHide) a relaunch (OnSecondInstance) must
+	// undo the hide, not just Unminimise+Show, or the window never comes back.
+	full := []string{"windowShow", "unminimise", "show"}
+
 	a := &App{}
 	a.setRuntimeContext(context.Background())
 	a.OnSecondInstance(options.SecondInstanceData{})
-	if want := []string{"unminimise", "show"}; !slices.Equal(calls, want) {
-		t.Fatalf("OnSecondInstance calls = %v, want %v", calls, want)
+	if !slices.Equal(calls, full) {
+		t.Fatalf("OnSecondInstance calls = %v, want %v", calls, full)
 	}
 
 	calls = nil
 	a.showWindow()
-	if want := []string{"windowShow", "unminimise", "show"}; !slices.Equal(calls, want) {
-		t.Fatalf("showWindow calls = %v, want %v", calls, want)
+	if !slices.Equal(calls, full) {
+		t.Fatalf("showWindow calls = %v, want %v", calls, full)
 	}
 }
 

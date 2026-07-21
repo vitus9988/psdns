@@ -97,14 +97,11 @@ func applyTrayIcon() {
 	systraySetIcon(trayPNG)
 }
 
-// showWindow reveals the window after a hide-to-tray (or a minimise), reusing
-// the same reveal sequence as OnSecondInstance.
+// showWindow reveals the window after a hide-to-tray (or a minimise) when the
+// tray icon/menu is clicked, using the same reveal sequence as OnSecondInstance
+// (see App.revealWindow).
 func (a *App) showWindow() {
-	ctx := a.runtimeContext()
-	if ctx == nil {
-		return
+	if ctx := a.runtimeContext(); ctx != nil {
+		a.revealWindow(ctx)
 	}
-	wailsWindowShow(ctx)
-	wailsWindowUnminimise(ctx)
-	wailsShow(ctx)
 }

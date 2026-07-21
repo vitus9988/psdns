@@ -52,6 +52,12 @@ func New(c doh.Exchanger) *Resolver {
 	return &Resolver{doh: c, cache: make(map[string]entry), inflight: make(map[string]*inflightCall)}
 }
 
+// maxLookupTime bounds the shared upstream lookup that runLookup performs for
+// all joined callers. Each caller still returns the instant its own context is
+// done (via the select in Resolve); this is only a safety ceiling so that a
+// pathological upstream cannot leave the lookup goroutine running forever.
+const maxLookupTime = 30 * time.Second
+
 // Resolve returns the IPs for host. An IP literal is returned unchanged.
 func (r *Resolver) Resolve(ctx context.Context, host string) ([]net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
@@ -62,34 +68,50 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]net.IP, error) {
 	// "Example.com" and "example.com" would be cached (and resolved) separately.
 	key := strings.ToLower(host)
 
-	now := time.Now()
 	r.mu.Lock()
-	if e, ok := r.cache[key]; ok && now.Before(e.expires) {
+	if e, ok := r.cache[key]; ok && time.Now().Before(e.expires) {
 		ips := e.ips
 		r.mu.Unlock()
-		return ips, nil
+		return cloneIPs(ips), nil // copy so a caller cannot mutate the cached slice
 	}
-	// Join an in-flight lookup for the same host instead of firing a duplicate.
-	if call, ok := r.inflight[key]; ok {
-		r.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.ips, call.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	// Join the in-flight lookup for this host, or become its leader. The leader
+	// launches the single shared lookup; every caller — leader included — then
+	// waits on the same result while independently honouring its own context.
+	call, leader := r.inflight[key], false
+	if call == nil {
+		call = &inflightCall{done: make(chan struct{})}
+		r.inflight[key] = call
+		leader = true
 	}
-	// Become the leader: publish the in-flight call before releasing the lock so
-	// every later caller joins it.
-	call := &inflightCall{done: make(chan struct{})}
-	r.inflight[key] = call
 	r.mu.Unlock()
+
+	if leader {
+		go r.runLookup(key, call)
+	}
+
+	select {
+	case <-call.done:
+		return cloneIPs(call.ips), call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// runLookup performs the one shared upstream lookup for key and publishes the
+// result to every caller waiting on call. It runs under a context detached from
+// any single caller's deadline (bounded only by maxLookupTime) so that a caller
+// giving up — its own context cancelled — cannot abort a lookup that other,
+// still-waiting callers depend on. On success the answer is cached.
+func (r *Resolver) runLookup(key string, call *inflightCall) {
+	ctx, cancel := context.WithTimeout(context.Background(), maxLookupTime)
+	defer cancel()
 
 	ips, ttl, err := r.lookup(ctx, key)
 	if err == nil && len(ips) == 0 {
-		err = fmt.Errorf("no addresses for %s", host)
+		err = fmt.Errorf("no addresses for %s", key)
 	}
 
+	now := time.Now()
 	r.mu.Lock()
 	if err == nil {
 		r.storeLocked(key, entry{ips: ips, expires: now.Add(ttl)}, now)
@@ -99,7 +121,16 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]net.IP, error) {
 
 	call.ips, call.err = ips, err
 	close(call.done)
-	return ips, err
+}
+
+// cloneIPs returns a shallow copy of ips so a caller may sort or append to its
+// result without corrupting the slice held in the cache — which the inflight
+// leader's result and every later cache hit share.
+func cloneIPs(ips []net.IP) []net.IP {
+	if ips == nil {
+		return nil
+	}
+	return append([]net.IP(nil), ips...)
 }
 
 // storeLocked inserts e under key while enforcing maxCacheEntries. The caller

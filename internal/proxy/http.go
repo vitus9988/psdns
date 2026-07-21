@@ -194,11 +194,16 @@ func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Req
 			return
 		}
 
-		// Bound the request write and the response-header read so a connected but
-		// silent origin cannot hang the handler indefinitely. The deadline is
-		// cleared before copying the body so a legitimately slow or streaming
-		// response is not truncated.
-		_ = upstream.SetWriteDeadline(time.Now().Add(p.cfg.Timeout))
+		// Bound the response-header read so a connected but silent origin cannot
+		// hang the handler indefinitely (cleared before copying the body so a
+		// slow or streaming response is not truncated). The request write is only
+		// deadline-bounded when there is no body to send — a small, buffered
+		// header exchange. A request that carries a body (an upload) must not be
+		// bounded by the fixed timeout, or req.Write, which streams the body
+		// inline, would abort a legitimately large or slow upload partway through.
+		if req.ContentLength == 0 {
+			_ = upstream.SetWriteDeadline(time.Now().Add(p.cfg.Timeout))
+		}
 		werr := req.Write(upstream)
 		_ = upstream.SetWriteDeadline(time.Time{})
 		if werr != nil {

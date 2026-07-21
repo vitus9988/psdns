@@ -44,7 +44,38 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 	resp.Id = req.Id
+	// Over UDP a datagram larger than the client's advertised buffer (or the
+	// 512-byte default when it sends no EDNS0 OPT) can be silently dropped in
+	// transit, so a large answer would just vanish. Truncate it to fit and set
+	// the TC bit, which tells the client to retry the query over TCP (RFC 1035
+	// §4.2.1) — where no such size limit applies. TCP responses are never
+	// truncated.
+	if isUDP(w) {
+		resp.Truncate(udpSize(req))
+	}
 	_ = w.WriteMsg(resp)
+}
+
+// isUDP reports whether the response will go back over UDP (as opposed to TCP),
+// which is the only transport that needs size-based truncation.
+func isUDP(w dns.ResponseWriter) bool {
+	if a := w.RemoteAddr(); a != nil {
+		return a.Network() == "udp"
+	}
+	return false
+}
+
+// udpSize is the largest UDP payload the client will accept: its EDNS0-advertised
+// buffer, floored at the 512-byte default (dns.MinMsgSize) and never taken below
+// it even if a client advertises something smaller.
+func udpSize(req *dns.Msg) int {
+	size := dns.MinMsgSize
+	if opt := req.IsEdns0(); opt != nil {
+		if adv := int(opt.UDPSize()); adv > size {
+			size = adv
+		}
+	}
+	return size
 }
 
 // ListenAndServe binds the UDP and TCP listeners and blocks until one of them

@@ -200,3 +200,59 @@ func TestHTTPPlainBadUpstreamResponse(t *testing.T) {
 		t.Fatal("expected the proxy to close the connection after a bad upstream response")
 	}
 }
+
+// TestHTTPPlainLargeUploadNotTruncated verifies a plaintext request carrying a
+// body is forwarded in full even when the upload spans longer than cfg.Timeout.
+// A body-carrying request must not be bounded by the fixed write deadline (which
+// exists only for the small, buffered header exchange), or a slow/large upload
+// would be aborted mid-stream. The body is dribbled across a pause exceeding the
+// timeout so a fixed write deadline would truncate it.
+func TestHTTPPlainLargeUploadNotTruncated(t *testing.T) {
+	const body = "0123456789abcdefghij" // 20 bytes, sent in two halves
+
+	gotBody := make(chan string, 1)
+	port := originServer(t, func(conn net.Conn) {
+		defer func() { _ = conn.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			gotBody <- "read-error"
+			return
+		}
+		b, _ := io.ReadAll(req.Body)
+		gotBody <- string(b)
+		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	})
+
+	res := mockResolver(t, "127.0.0.1")
+
+	// A short timeout: under a fixed request-write deadline (= Timeout) the write
+	// would abort while the body is still being dribbled in.
+	addr := pickPort(t)
+	cfg := testConfig(addr, "127.0.0.1:0")
+	cfg.Timeout = 150 * time.Millisecond
+	hp := proxy.NewHTTP(res, cfg)
+	go func() { _ = hp.ListenAndServe() }()
+	t.Cleanup(func() { _ = hp.Close() })
+	_ = waitListen(t, addr).Close()
+
+	conn := waitListen(t, addr)
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
+
+	target := "blocked.example.com:" + port
+	_, _ = fmt.Fprintf(conn, "POST http://%s/ HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n\r\n", target, target, len(body))
+	_, _ = conn.Write([]byte(body[:10]))
+	time.Sleep(300 * time.Millisecond) // exceed cfg.Timeout mid-upload
+	_, _ = conn.Write([]byte(body[10:]))
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := <-gotBody; got != body {
+		t.Fatalf("origin received %q, want the full %d-byte upload %q", got, len(body), body)
+	}
+}

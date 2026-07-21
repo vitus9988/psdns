@@ -324,3 +324,75 @@ func TestResolveCacheKeyCaseInsensitive(t *testing.T) {
 		t.Fatalf("case-variant lookup hit upstream: requests %d -> %d (want cache hit)", first, got)
 	}
 }
+
+// TestResolveLeaderCancelDoesNotFailJoiner verifies that when the caller that
+// started a shared lookup (the leader) cancels its context, a second caller that
+// joined the same lookup with a live context still receives the answer instead
+// of inheriting the leader's cancellation. The shared lookup runs detached from
+// any single caller's deadline, so the leader giving up must not abort it.
+func TestResolveLeaderCancelDoesNotFailJoiner(t *testing.T) {
+	c, _ := mockDoH(t, answer{
+		a:     []dnsRR{{ip: "1.2.3.4", ttl: 300}},
+		aaaa:  []dnsRR{{ip: "2001:db8::1", ttl: 300}},
+		delay: 400 * time.Millisecond, // hold the lookup open long enough to cancel mid-flight
+	})
+	r := resolver.New(c)
+
+	type result struct {
+		ips []net.IP
+		err error
+	}
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderCh := make(chan result, 1)
+	joinerCh := make(chan result, 1)
+
+	go func() {
+		ips, err := r.Resolve(leaderCtx, "example.com")
+		leaderCh <- result{ips, err}
+	}()
+	time.Sleep(50 * time.Millisecond) // let the leader register the in-flight lookup
+	go func() {
+		ips, err := r.Resolve(context.Background(), "example.com")
+		joinerCh <- result{ips, err}
+	}()
+	time.Sleep(50 * time.Millisecond) // let the joiner attach to it
+	cancelLeader()
+
+	if lr := <-leaderCh; lr.err == nil {
+		t.Fatal("leader whose context was cancelled should return an error")
+	}
+	jr := <-joinerCh
+	if jr.err != nil {
+		t.Fatalf("joiner with a live context must still resolve: %v", jr.err)
+	}
+	if !ipStrings(jr.ips)["1.2.3.4"] {
+		t.Fatalf("joiner result missing A record: %v", jr.ips)
+	}
+}
+
+// TestResolveReturnsCopyNotCachedSlice verifies Resolve hands back a copy of the
+// IP slice: a caller mutating its result must not corrupt the slice retained in
+// the cache and served to later callers.
+func TestResolveReturnsCopyNotCachedSlice(t *testing.T) {
+	c, _ := mockDoH(t, answer{a: []dnsRR{{ip: "1.2.3.4", ttl: 300}, {ip: "5.6.7.8", ttl: 300}}})
+	r := resolver.New(c)
+
+	first, err := r.Resolve(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	if len(first) == 0 {
+		t.Fatal("no IPs returned")
+	}
+	for i := range first { // clobber the returned slice
+		first[i] = net.ParseIP("9.9.9.9")
+	}
+
+	second, err := r.Resolve(context.Background(), "example.com") // served from cache
+	if err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+	if !ipStrings(second)["1.2.3.4"] {
+		t.Fatalf("cache corrupted by caller mutation: %v", second)
+	}
+}

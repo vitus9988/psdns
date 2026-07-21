@@ -168,10 +168,19 @@ func (a *App) Shutdown(ctx context.Context) {
 // OnSecondInstance brings the existing window to the front when the user
 // launches the app again (wired to SingleInstanceLock).
 func (a *App) OnSecondInstance(_ options.SecondInstanceData) {
-	ctx := a.runtimeContext()
-	if ctx == nil {
-		return
+	if ctx := a.runtimeContext(); ctx != nil {
+		a.revealWindow(ctx)
 	}
+}
+
+// revealWindow brings the window back after a hide-to-tray or a minimise. All
+// three calls are needed and must run together: WindowShow undoes the
+// BeforeClose WindowHide, WindowUnminimise undoes a minimise, and Show raises
+// and focuses it — a window hidden by WindowHide will not reappear on
+// Unminimise+Show alone. Shared by the tray click (showWindow) and
+// OnSecondInstance so neither path can drift from the full sequence.
+func (a *App) revealWindow(ctx context.Context) {
+	wailsWindowShow(ctx)
 	wailsWindowUnminimise(ctx)
 	wailsShow(ctx)
 }
