@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 
 	"github.com/vitus9988/psdns/internal/gui"
@@ -10,17 +11,25 @@ import (
 	"github.com/vitus9988/psdns/internal/selfupdate"
 )
 
+// trueCmd returns a command that exits immediately with status 0 on this OS.
+func trueCmd() *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/c", "exit", "0")
+	}
+	return exec.Command("/usr/bin/true")
+}
+
 // deadReapedPID spawns a short-lived process, waits for it to fully exit and be
 // reaped, then returns its now-defunct pid. A reaped pid no longer exists, so
 // relaunch's process-exit poll returns immediately without waiting.
 func deadReapedPID(t *testing.T) int {
 	t.Helper()
-	cmd := exec.Command("/usr/bin/true")
+	cmd := trueCmd()
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start /usr/bin/true: %v", err)
+		t.Fatalf("start %v: %v", cmd.Args, err)
 	}
 	if err := cmd.Wait(); err != nil {
-		t.Fatalf("wait /usr/bin/true: %v", err)
+		t.Fatalf("wait %v: %v", cmd.Args, err)
 	}
 	return cmd.Process.Pid
 }

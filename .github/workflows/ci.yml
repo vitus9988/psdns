@@ -117,3 +117,11 @@ jobs:
       - name: go test -race (GUI cgo packages)
         shell: bash
         run: go test -race ./internal/gui/... ./cmd/psdns-gui/...
+      # Mirror release.yml's per-OS test step for the non-GUI packages too.
+      # Cross-OS `go vet` in the checks job only type-checks; runtime-only
+      # Windows failures (path separators, exec bits, missing /usr/bin tools)
+      # otherwise surface for the first time at tag push, burning an rc tag
+      # per attempt (v0.9.0-rc.6/7/10).
+      - name: go test -race (non-GUI packages, release-gate mirror)
+        shell: bash
+        run: go test -race $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')

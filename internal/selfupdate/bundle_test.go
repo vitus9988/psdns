@@ -8,15 +8,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	minio "github.com/minio/selfupdate"
 )
 
 func TestMacAppBundleRoot(t *testing.T) {
+	// filepath.Dir rebuilds the path with the OS separator, so on Windows the
+	// returned root uses backslashes — normalize the expectation the same way.
+	want := filepath.FromSlash("/Applications/psdns.app")
 	root, ok := macAppBundleRoot("/Applications/psdns.app/Contents/MacOS/psdns-gui")
-	if !ok || root != "/Applications/psdns.app" {
-		t.Fatalf("macAppBundleRoot = %q,%v; want /Applications/psdns.app,true", root, ok)
+	if !ok || root != want {
+		t.Fatalf("macAppBundleRoot = %q,%v; want %q,true", root, ok, want)
 	}
 	for _, p := range []string{
 		"/usr/local/bin/psdns",              // bare CLI binary
@@ -101,8 +105,10 @@ func TestExtractAppBundleTarGz(t *testing.T) {
 	if b, err := os.ReadFile(binPath); err != nil || string(b) != "gui-bin" {
 		t.Fatalf("inner binary = %q, err %v; want gui-bin", b, err)
 	}
-	if fi, _ := os.Stat(binPath); fi.Mode().Perm()&0o100 == 0 {
-		t.Fatalf("inner binary not executable: mode %v", fi.Mode())
+	if runtime.GOOS != "windows" { // Windows has no executable bit
+		if fi, _ := os.Stat(binPath); fi.Mode().Perm()&0o100 == 0 {
+			t.Fatalf("inner binary not executable: mode %v", fi.Mode())
+		}
 	}
 	if b, err := os.ReadFile(filepath.Join(dest, "Contents", "Info.plist")); err != nil || string(b) != "<plist/>" {
 		t.Fatalf("Info.plist = %q, err %v", b, err)
