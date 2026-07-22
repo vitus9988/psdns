@@ -224,6 +224,11 @@ jobs:
         # A stable vX.Y.Z supersedes its vX.Y.Z-rc.* test pre-releases, so once
         # the stable release is published we delete those pre-releases and their
         # git tags — keeps the Releases page from accumulating stale rc entries.
+        # Two passes are needed: `gh release delete --cleanup-tag` only covers
+        # rc tags that have a published release, but a failed rc workflow run
+        # (build/lint failure) leaves a tag with no release, which `gh release
+        # list` never returns — so a second pass enumerates the remaining
+        # ${base}-rc.* tag refs directly and deletes those orphans.
         # Runs only for a plain vX.Y.Z tag; pre-release tags contain '-' and are
         # skipped (the inverse of the prerelease flag above). Uses GITHUB_TOKEN
         # (contents: write) so it is fully automatic — no local gh auth needed.
@@ -236,20 +241,40 @@ jobs:
           set -euo pipefail
           base="${GITHUB_REF_NAME}"
           echo "정식 ${base} 발행 — ${base}-rc.* 프리릴리즈/태그를 정리합니다."
-          if ! rcs=$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 \
-                       --json tagName \
-                       --jq ".[] | select(.tagName | startswith(\"${base}-rc.\")) | .tagName"); then
-            echo "::warning::rc 프리릴리즈 목록 조회 실패 — 정리를 건너뜁니다."
-            exit 0
+
+          # 1) 게시된 rc 프리릴리즈 삭제 (--cleanup-tag 로 태그도 함께 삭제)
+          if rcs=$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 \
+                     --json tagName \
+                     --jq ".[] | select(.tagName | startswith(\"${base}-rc.\")) | .tagName"); then
+            if [ -z "${rcs}" ]; then
+              echo "정리할 ${base}-rc.* 프리릴리즈가 없습니다."
+            else
+              echo "${rcs}" | while IFS= read -r rc; do
+                [ -n "${rc}" ] || continue
+                echo "릴리즈 삭제: ${rc}"
+                gh release delete "${rc}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes \
+                  || echo "::warning::${rc} 릴리즈 삭제 실패(또는 이미 없음) — 건너뜁니다."
+              done
+            fi
+          else
+            echo "::warning::rc 프리릴리즈 목록 조회 실패 — 릴리즈 정리를 건너뜁니다."
           fi
-          if [ -z "${rcs}" ]; then
-            echo "정리할 ${base}-rc.* 프리릴리즈가 없습니다."
-            exit 0
+
+          # 2) 릴리즈 없이 남은 고아 rc 태그 삭제 (실패한 rc 런이 남긴 태그)
+          if orphans=$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${base}-rc." \
+                         --jq '.[].ref'); then
+            if [ -z "${orphans}" ]; then
+              echo "정리할 ${base}-rc.* 고아 태그가 없습니다."
+            else
+              echo "${orphans}" | while IFS= read -r ref; do
+                [ -n "${ref}" ] || continue
+                tag="${ref#refs/tags/}"
+                echo "고아 태그 삭제: ${tag}"
+                gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" \
+                  || echo "::warning::${tag} 태그 삭제 실패 — 건너뜁니다."
+              done
+            fi
+          else
+            echo "::warning::rc 태그 목록 조회 실패 — 태그 정리를 건너뜁니다."
           fi
-          echo "${rcs}" | while IFS= read -r rc; do
-            [ -n "${rc}" ] || continue
-            echo "삭제: ${rc}"
-            gh release delete "${rc}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes \
-              || echo "::warning::${rc} 삭제 실패(또는 이미 없음) — 건너뜁니다."
-          done
           echo "✓ ${base}-rc.* 정리 완료"
