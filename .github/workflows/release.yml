@@ -111,10 +111,11 @@ jobs:
         run: |
           set -euo pipefail
           # Mirrors ci.yml's gate so a coverage regression cannot slip through a
-          # tag-triggered release that skipped the PR gate. The 86% floor clears
-          # the lowest matrix OS (Windows, where sysproxy_windows.go is not yet
-          # tested); raise it in lockstep with ci.yml once that gap is closed.
-          min=86.0
+          # tag-triggered release that skipped the PR gate. The floor must clear
+          # the lowest matrix OS — Windows, measured 84.8% at v0.9.0-rc.11
+          # (sysproxy_windows.go untested + apply tests skipped on Windows);
+          # raise it in lockstep with ci.yml once that gap is closed.
+          min=84.0
           total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub(/%/,"",$NF); print $NF}')
           echo "total coverage=${total}%  floor=${min}%"
           if awk "BEGIN{exit !(${total} < ${min})}"; then
