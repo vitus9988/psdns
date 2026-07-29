@@ -21,11 +21,12 @@
 
 - **통합 작업은 `test` 브랜치에서 진행하고, `main` 은 검증된 릴리즈 상태만 유지한다.** 산출물 전용 버그(서명·포트 바인딩·패키징 등)는 `go test` 로 못 잡고 **실제 빌드·패키징된 릴리즈에서만** 드러나므로, 정식 배포 전에 프리릴리즈로 실물을 검증하는 채널을 둔다. 흐름:
   1. 수정사항을 `test` 브랜치에 커밋·푸시한다. → `ci.yml`(gofmt·vet·test·README↔go.mod Wails 대조)이 PR/푸시에서 돈다.
-  2. `vX.Y.Z-rc.N` 태그(프리릴리즈)를 달아 푸시한다. → `release.yml` 이 6개 아카이브를 빌드해 **프리릴리즈**로 게시한다(`prerelease: contains(ref_name,'-')`). 실제 Windows/macOS 산출물을 받아 검증한다.
-  3. 통과하면 `test` → `main` 으로 **PR·머지**한다.
-  4. `main` 에서 `vX.Y.Z`(접미사 없는) 태그를 달아 **정식 릴리즈**한다. → 정식 태그 게시 후 `release.yml` 의 정리 스텝(`if: !contains(ref_name,'-')`)이 그 버전의 `vX.Y.Z-rc.*` 프리릴리즈/태그를 `GITHUB_TOKEN`(`contents: write`)으로 **자동 삭제**한다(rc 는 일회용이라 정식이 대체하면 폐기). 이 정리는 CI 에서 일어나므로 로컬 `gh` 인증이나 `release-main.sh` 실행에 의존하지 않는다 — `release-main.sh` 는 무엇이 정리될지 표시만 하고 직접 삭제하지 않는다.
+  2. `vX.Y.Z-rc.N` 태그(프리릴리즈)를 달아 푸시한다. → `release.yml` 이 6개 아카이브를 빌드해 **프리릴리즈**로 게시하고(`prerelease: contains(ref_name,'-')`), 이어서 `verify` 잡(3-OS)이 산출물 다운로드·체크섬·CLI 스모크를 자동 검증한다(`scripts/verify-release.sh`, 로컬에서도 실행 가능). GUI 는 실제 Windows/macOS 산출물을 받아 사람이 확인한다. **`release-test.sh` 는 태그 push 후 릴리즈 런을 감시해 실패 시 rc 태그를 자동 회수한다**(같은 번호 재사용·고아 태그 차단; 타임아웃·Ctrl-C 는 회수하지 않음). **회수는 rc 전용이다 — 정식 태그를 지우는 코드는 `release-main.sh` 에 의도적으로 없다(자동 삭제 금지).**
+  3. 통과하면 `test` → `main` 으로 병합한다. `release-main.sh` 는 기본적으로 직접 push 하고, **main 브랜치 보호로 push 가 거부되면 자동으로 PR 생성→체크 대기→머지로 폴백**한다(`--pr` 로 강제). push 거부만 폴백 트리거다 — ff 불가·병합 충돌 같은 상태 이상은 종전대로 중단한다(보호와 무관한 문제를 PR 로 우회하지 않기 위함).
+  4. `main` 에서 `vX.Y.Z`(접미사 없는) 태그를 달아 **정식 릴리즈**한다. → 정식 태그 게시 후 `release.yml` 의 정리 스텝(`if: !contains(ref_name,'-')`)이 `scripts/prune-rc.sh` 로 그 버전의 `vX.Y.Z-rc.*` 프리릴리즈/태그를 `GITHUB_TOKEN`(`contents: write`)으로 **자동 삭제**한다(rc 는 일회용이라 정식이 대체하면 폐기; 정식 없이 버려진 버전 라인은 같은 스크립트를 로컬 gh 인증으로 직접 실행해 정리). 이 정리는 CI 에서 일어나므로 로컬 `gh` 인증에 의존하지 않는다 — `release-main.sh` 는 원격을 직접 삭제하지 않고, 게시 성공을 확인한 뒤 로컬 rc 태그만 정리한다. 릴리즈 본문은 `scripts/release-notes.sh` 가 conventional commit 프리픽스로 분류해 생성한다(`body_path` + `generate_release_notes` 병행 — GitHub 이 비교 링크를 뒤에 덧붙인다).
 - **버전 규칙:** `-` 가 들어간 태그(`-rc.N`)는 프리릴리즈로 게시되며 자동 업데이트 대상에서 제외된다(`/releases/latest` 가 프리릴리즈를 빼고, `internal/selfupdate` 도 안정 빌드에 프리릴리즈를 제안하지 않음 — 이중 안전장치). 접미사 없는 `vX.Y.Z` 만 모든 사용자에게 자동 업데이트로 제안된다. **따라서 `-rc` 와 최종 태그를 헷갈리지 말 것.**
-- `main` 보호(PR 필수·`ci.yml` 통과 필수)는 GitHub 저장소 설정이라 코드로 강제되지 않는다 — 별도 수동 설정 권장.
+- **verify 잡은 release.yml 내부 잡이어야 한다 — 별도 워크플로로 분리 금지.** 릴리즈는 `GITHUB_TOKEN` 으로 게시되는데 GITHUB_TOKEN 이 만든 이벤트는 다른 워크플로를 트리거하지 않으므로, `on: release` 별도 워크플로로 옮기면 영영 발화하지 않는다. 같은 맥락의 순서 계약: release 잡의 `actions/checkout` 은 `download-artifact` **앞**이어야 한다(checkout 이 작업트리를 정리해 순서가 바뀌면 받아 둔 dist/ 가 지워진다). 릴리즈 스크립트 공용 gh 헬퍼는 `scripts/release-lib.sh` 에 있고 bash 3.2(macOS 기본) 호환을 유지한다 — gh 미설치/미인증이면 release-test/main 은 감시·회수·정리 단계만 조용히 생략한다(push·태그까지는 종전과 동일, "safe to run by hand"). 단독 실행하는 `verify-release.sh`·`prune-rc.sh` 는 gh 가 기능 자체라 없으면 에러로 알린다.
+- `main` 보호(PR 필수·`ci.yml` 통과 필수)는 GitHub 저장소 설정이라 코드로 강제되지 않는다 — README §테스트 채널의 ruleset 명령으로 1회 설정한다(보호를 켜면 `release-main.sh` 가 자동으로 PR 경로를 쓴다).
 
 <!-- graphify:managed -->
 ## graphify
