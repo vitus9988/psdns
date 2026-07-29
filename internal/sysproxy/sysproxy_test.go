@@ -238,6 +238,29 @@ func TestAlive(t *testing.T) {
 	}
 }
 
+func TestMatchesApplied(t *testing.T) {
+	tests := []struct {
+		name    string
+		cur     DetectedProxy
+		applied string
+		want    bool
+	}{
+		{"exact", DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 8080}, "127.0.0.1:8080", true},
+		{"loopback alias localhost", DetectedProxy{Enabled: true, Host: "localhost", Port: 8080}, "127.0.0.1:8080", true},
+		{"loopback alias ipv6", DetectedProxy{Enabled: true, Host: "::1", Port: 8080}, "127.0.0.1:8080", true},
+		{"other port", DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 3128}, "127.0.0.1:8080", false},
+		{"disabled", DetectedProxy{Enabled: false, Host: "127.0.0.1", Port: 8080}, "127.0.0.1:8080", false},
+		{"non-loopback case-insensitive", DetectedProxy{Enabled: true, Host: "MyHost.local", Port: 8080}, "myhost.local:8080", true},
+		{"non-loopback mismatch", DetectedProxy{Enabled: true, Host: "10.0.0.1", Port: 8080}, "127.0.0.1:8080", false},
+		{"unparsable applied", DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 8080}, "garbage", false},
+	}
+	for _, tc := range tests {
+		if got := matchesApplied(tc.cur, tc.applied); got != tc.want {
+			t.Errorf("%s: matchesApplied = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // aliveNever/aliveAlways are fake probes for neutralizeStale tests; aliveNone
 // asserts the probe is not consulted at all.
 func aliveNever(string, int) bool  { return false }

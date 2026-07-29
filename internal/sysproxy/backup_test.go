@@ -1,9 +1,11 @@
 package sysproxy
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -107,6 +109,103 @@ func TestRecoverStaleForeignOSBackupDiscarded(t *testing.T) {
 	}
 	if backupExists() {
 		t.Error("foreign-OS backup must be deleted")
+	}
+}
+
+// swapRecoverSeams replaces the OS capture/restore seams for RecoverStale tests
+// and restores them on cleanup. restored records every osRestore call.
+func swapRecoverSeams(t *testing.T, capture func() (Backup, error)) (restored *[]Backup) {
+	t.Helper()
+	origCapture, origRestore := osCapture, osRestore
+	t.Cleanup(func() { osCapture, osRestore = origCapture, origRestore })
+	osCapture = capture
+	var calls []Backup
+	osRestore = func(b Backup) error { calls = append(calls, b); return nil }
+	return &calls
+}
+
+func TestRecoverStaleRestoresWhenStillOurs(t *testing.T) {
+	redirectConfigDir(t)
+	// The OS proxy still points at what the crashed run applied -> restore it.
+	restored := swapRecoverSeams(t, func() (Backup, error) {
+		return Backup{Windows: &windowsBackup{ProxyEnable: 1, ProxyServer: "https=127.0.0.1:8080"}}, nil
+	})
+	if err := writeBackup(Backup{Version: backupVersion, OS: runtime.GOOS, AppliedProxy: "127.0.0.1:8080"}); err != nil {
+		t.Fatalf("writeBackup: %v", err)
+	}
+	recovered, err := RecoverStale()
+	if err != nil || !recovered {
+		t.Fatalf("RecoverStale = %v, %v; want recovered", recovered, err)
+	}
+	if len(*restored) != 1 {
+		t.Errorf("osRestore calls = %d, want 1", len(*restored))
+	}
+	if backupExists() {
+		t.Error("backup must be deleted after recovery")
+	}
+}
+
+func TestRecoverStaleRespectsUserChange(t *testing.T) {
+	redirectConfigDir(t)
+	// Since the crash the user pointed the OS at another proxy (or turned it
+	// off): restoring our old snapshot would clobber that, so only drop the backup.
+	for name, cur := range map[string]Backup{
+		"different proxy": {Windows: &windowsBackup{ProxyEnable: 1, ProxyServer: "https=127.0.0.1:3128"}},
+		"proxy disabled":  {Windows: &windowsBackup{ProxyEnable: 0}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			restored := swapRecoverSeams(t, func() (Backup, error) { return cur, nil })
+			if err := writeBackup(Backup{Version: backupVersion, OS: runtime.GOOS, AppliedProxy: "127.0.0.1:8080"}); err != nil {
+				t.Fatalf("writeBackup: %v", err)
+			}
+			recovered, err := RecoverStale()
+			if err != nil || recovered {
+				t.Fatalf("RecoverStale = %v, %v; want not recovered, no error", recovered, err)
+			}
+			if len(*restored) != 0 {
+				t.Error("osRestore must not run when the user changed the proxy")
+			}
+			if backupExists() {
+				t.Error("backup must still be deleted")
+			}
+		})
+	}
+}
+
+func TestRecoverStaleLegacyBackupRestores(t *testing.T) {
+	redirectConfigDir(t)
+	// A backup without AppliedProxy predates the guard: restore as before,
+	// without consulting the current OS state at all.
+	restored := swapRecoverSeams(t, func() (Backup, error) {
+		t.Fatal("legacy backups must not trigger a capture")
+		return Backup{}, nil
+	})
+	if err := writeBackup(Backup{Version: backupVersion, OS: runtime.GOOS}); err != nil {
+		t.Fatalf("writeBackup: %v", err)
+	}
+	recovered, err := RecoverStale()
+	if err != nil || !recovered {
+		t.Fatalf("RecoverStale = %v, %v; want recovered", recovered, err)
+	}
+	if len(*restored) != 1 {
+		t.Errorf("osRestore calls = %d, want 1", len(*restored))
+	}
+}
+
+func TestRecoverStaleDetectionErrorFailOpen(t *testing.T) {
+	redirectConfigDir(t)
+	// When the current state cannot be read, fall open to restoring — the same
+	// stance as the conflict guard.
+	restored := swapRecoverSeams(t, func() (Backup, error) { return Backup{}, errors.New("boom") })
+	if err := writeBackup(Backup{Version: backupVersion, OS: runtime.GOOS, AppliedProxy: "127.0.0.1:8080"}); err != nil {
+		t.Fatalf("writeBackup: %v", err)
+	}
+	recovered, err := RecoverStale()
+	if err != nil || !recovered {
+		t.Fatalf("RecoverStale = %v, %v; want recovered (fail-open)", recovered, err)
+	}
+	if len(*restored) != 1 {
+		t.Errorf("osRestore calls = %d, want 1", len(*restored))
 	}
 }
 

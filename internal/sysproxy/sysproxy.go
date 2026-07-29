@@ -166,14 +166,38 @@ func Restore() error {
 
 // RecoverStale restores a backup left by a previous run that exited without
 // restoring (a crash or force-kill). On a clean start there is no backup and it
-// does nothing. Returns whether a stale backup was actually recovered.
+// does nothing. Unlike Restore — the in-session stop path, which always owes its
+// restore — arbitrary time has passed since the crash: when the OS proxy no
+// longer matches what that run applied (the user or another app changed it in
+// the meantime), restoring the old snapshot would clobber that change, so the
+// backup is only dropped. A detection error falls open to restoring, matching
+// the conflict guard's stance; a legacy backup without AppliedProxy restores as
+// before. Returns whether a stale backup was actually recovered.
 func RecoverStale() (bool, error) {
-	return restoreBackup()
+	b, ok, err := readBackup()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	if b.OS != runtime.GOOS {
+		return false, deleteBackup()
+	}
+	if b.AppliedProxy != "" {
+		if cur, cerr := Current(); cerr == nil && !matchesApplied(cur, b.AppliedProxy) {
+			return false, deleteBackup()
+		}
+	}
+	if err := osRestore(b); err != nil {
+		return false, err
+	}
+	return true, deleteBackup()
 }
 
-// restoreBackup is the shared core of Restore and RecoverStale: read the backup,
-// hand it to the OS restore, then delete it. A backup written on a different OS
-// (e.g. a synced config dir) is discarded rather than applied.
+// restoreBackup is the core of Restore: read the backup, hand it to the OS
+// restore, then delete it. A backup written on a different OS (e.g. a synced
+// config dir) is discarded rather than applied.
 func restoreBackup() (bool, error) {
 	b, ok, err := readBackup()
 	if err != nil {

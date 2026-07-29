@@ -122,7 +122,9 @@ func TestApplyRestoreRoundTrip(t *testing.T) {
 
 func TestRecoverStaleRestoresMatchingOS(t *testing.T) {
 	redirectConfigDir(t)
-	fake := &fakeNetworksetup{}
+	// The fake's current state still shows exactly what the crashed run applied,
+	// so RecoverStale's user-change guard lets the restore proceed.
+	fake := &fakeNetworksetup{webProxy: "Enabled: Yes\nServer: 127.0.0.1\nPort: 8080\n"}
 	fake.install(t)
 
 	b := Backup{
@@ -148,7 +150,8 @@ func TestRecoverStaleRestoresMatchingOS(t *testing.T) {
 		t.Error("recovered backup must be deleted")
 	}
 	// The enabled service is re-pointed at its old server; the untouched one is
-	// switched off and its bypass list cleared.
+	// switched off and its bypass list cleared. The guard's read-only capture
+	// prefixes the call log, so assert just the mutating (-set*) sequence.
 	wantCalls := [][]string{
 		{"-setwebproxy", "Wi-Fi", "10.0.0.1", "3128"},
 		{"-setwebproxystate", "Wi-Fi", "on"},
@@ -158,8 +161,14 @@ func TestRecoverStaleRestoresMatchingOS(t *testing.T) {
 		{"-setsecurewebproxystate", "Thunderbolt Bridge", "off"},
 		{"-setproxybypassdomains", "Thunderbolt Bridge", "Empty"},
 	}
-	if !reflect.DeepEqual(fake.calls, wantCalls) {
-		t.Errorf("restore sequence:\n got %v\nwant %v", fake.calls, wantCalls)
+	var setCalls [][]string
+	for _, c := range fake.calls {
+		if strings.HasPrefix(c[0], "-set") {
+			setCalls = append(setCalls, c)
+		}
+	}
+	if !reflect.DeepEqual(setCalls, wantCalls) {
+		t.Errorf("restore sequence:\n got %v\nwant %v", setCalls, wantCalls)
 	}
 }
 

@@ -122,6 +122,20 @@ func currentFromBackup(b Backup) DetectedProxy {
 	return DetectedProxy{}
 }
 
+// matchesApplied reports whether the OS proxy cur is still exactly what a
+// crashed psdns session recorded as applied (all loopback spellings count as
+// equal, same port) — i.e. nothing else has touched the setting since.
+func matchesApplied(cur DetectedProxy, applied string) bool {
+	h, p, ok := splitHostPort(applied)
+	if !ok || !cur.Enabled || cur.Port != p {
+		return false
+	}
+	if isLoopback(cur.Host) && isLoopback(h) {
+		return true
+	}
+	return strings.EqualFold(cur.Host, h)
+}
+
 // staleEntry reports whether a captured proxy entry must not be restored as-is:
 // a loopback entry that is either the address Apply is about to serve (a remnant
 // of a previous psdns run — our own listener answers a probe, so liveness alone
