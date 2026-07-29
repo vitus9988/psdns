@@ -56,13 +56,37 @@
     return i > 0 ? addr.slice(0, i) : addr;
   };
 
+  // Toasts show one after another instead of clobbering each other: a
+  // port-fallback notice and a sysproxy notice can arrive back-to-back on a
+  // single Start, and both must reach the user.
+  const toastQueue = [];
+  let toastShowing = false;
   function toast(msg) {
+    toastQueue.push(msg);
+    if (!toastShowing) nextToast();
+  }
+  function nextToast() {
     const t = $("toast");
+    const msg = toastQueue.shift();
+    if (msg === undefined) {
+      toastShowing = false;
+      t.hidden = true;
+      return;
+    }
+    toastShowing = true;
     t.textContent = msg;
     t.hidden = false;
-    clearTimeout(toast._t);
-    toast._t = setTimeout(() => { t.hidden = true; }, 1500);
+    setTimeout(nextToast, 1800);
   }
+
+  // The sysproxy skip/failure reason outlives the toast stream: it explains why
+  // protection is on while the OS proxy was left alone, so it stays visible
+  // until dismissed, superseded, or the next Start/apply clears it.
+  function showSysProxyNotice(msg) {
+    $("sysProxyBannerSub").textContent = msg || "";
+    $("sysProxyBanner").hidden = false;
+  }
+  function clearSysProxyNotice() { $("sysProxyBanner").hidden = true; }
 
   function showError(msg) {
     const el = $("listenerErr");
@@ -259,6 +283,7 @@
     try {
       if (!running) {
         if (!(await persist())) { return; }
+        clearSysProxyNotice(); // a fresh Start reports its own sysproxy outcome
         $("heroTitle").textContent = "켜는 중이에요…";
         lastState = await app.Start(mode);
       } else {
@@ -417,6 +442,7 @@
     $("updateBtn").addEventListener("click", applyUpdate);
     $("updateDot").addEventListener("click", () => $("updateBanner").scrollIntoView({ behavior: "smooth" }));
     $("updateClose").addEventListener("click", () => closeModal("updateModal"));
+    $("sysProxyBannerClose").addEventListener("click", clearSysProxyNotice);
 
     if (rt && rt.EventsOn) {
       rt.EventsOn("update:available", showUpdate);
@@ -435,11 +461,14 @@
         $("updateProgress").style.width = "0%";
         $("updateClose").hidden = false;
       });
-      // System-proxy auto-config toasts, emitted by App.Start/Stop/Shutdown.
-      rt.EventsOn("sysproxy:applied", (m) => toast(m || "시스템 프록시를 자동으로 맞췄어요"));
-      rt.EventsOn("sysproxy:restored", (m) => toast(m || "시스템 프록시를 원래대로 되돌렸어요"));
-      rt.EventsOn("sysproxy:error", (m) => toast(m || "시스템 프록시 설정에 실패했어요"));
-      rt.EventsOn("sysproxy:conflict", (m) => toast(m || "다른 로컬 프록시와 충돌해 자동 설정을 건너뛰었어요"));
+      // System-proxy auto-config notices, emitted by App.Start/Stop/Shutdown.
+      // Success/restore are transient toasts; a skip or failure goes to the
+      // persistent banner so its reason cannot be buried by later toasts
+      // (e.g. the port-fallback notice fired right after Start returns).
+      rt.EventsOn("sysproxy:applied", (m) => { clearSysProxyNotice(); toast(m || "시스템 프록시를 자동으로 맞췄어요"); });
+      rt.EventsOn("sysproxy:restored", (m) => { clearSysProxyNotice(); toast(m || "시스템 프록시를 원래대로 되돌렸어요"); });
+      rt.EventsOn("sysproxy:error", (m) => showSysProxyNotice(m || "시스템 프록시 설정에 실패했어요. 아래 주소를 복사해 직접 넣어 주세요."));
+      rt.EventsOn("sysproxy:conflict", (m) => showSysProxyNotice(m || "다른 로컬 프록시와 충돌해 자동 설정을 건너뛰었어요"));
     }
   }
 

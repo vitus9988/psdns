@@ -327,6 +327,8 @@ body { min-height: 100vh; }
 .banner__text { flex: 1; }
 .banner__title { font-size: 16px; font-weight: 600; color: var(--text-strong); }
 .banner__sub { font-size: 12px; color: var(--text-weak); margin-top: 2px; }
+.banner--warn { background: var(--danger-weak); }
+.banner--warn .banner__icon { color: var(--danger); }
 @keyframes slidein { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
 
 /* Footer */

@@ -27,6 +27,17 @@
         <button id="updateBtn" class="btn btn--primary btn--sm" type="button">업데이트</button>
       </section>
 
+      <!-- System-proxy notice banner: why auto-config was skipped or failed.
+           Persistent (unlike the toast) so the reason survives later toasts. -->
+      <section id="sysProxyBanner" class="banner banner--warn" role="alert" hidden>
+        <div class="banner__icon" aria-hidden="true">!</div>
+        <div class="banner__text">
+          <div class="banner__title">시스템 프록시 자동 설정 안내</div>
+          <div id="sysProxyBannerSub" class="banner__sub"></div>
+        </div>
+        <button id="sysProxyBannerClose" class="btn btn--ghost btn--sm" type="button" aria-label="안내 닫기">닫기</button>
+      </section>
+
       <!-- ② HERO status card -->
       <section class="card hero">
         <div class="hero__status">
