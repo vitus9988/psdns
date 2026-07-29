@@ -12,7 +12,17 @@ import (
 	"net"
 	"runtime"
 	"strconv"
-	"strings"
+	"time"
+)
+
+// capture/apply/restore are provided per-OS in build-tagged files and shell out
+// to OS tools (networksetup, gsettings, the registry). These indirections let
+// tests swap them out and exercise Apply/Restore/RecoverStale hermetically on
+// any OS; production code must always go through them.
+var (
+	osCapture = capture
+	osApply   = apply
+	osRestore = restore
 )
 
 // Settings is the proxy configuration to apply. Host/Port come from the live
@@ -78,7 +88,7 @@ type DetectedProxy struct {
 // about a conflicting local filtering proxy (e.g. AdGuard) that Apply would
 // otherwise overwrite.
 func Current() (DetectedProxy, error) {
-	b, err := capture()
+	b, err := osCapture()
 	if err != nil {
 		return DetectedProxy{}, err
 	}
@@ -87,12 +97,35 @@ func Current() (DetectedProxy, error) {
 
 // ConflictsWith reports whether d is a *different* loopback proxy than host:port —
 // i.e. another local filtering proxy that Apply would route around. A disabled
-// proxy, a non-loopback proxy, or our own address is not a conflict.
+// proxy, a non-loopback proxy, or our own address is not a conflict. All loopback
+// spellings (localhost, 127.0.0.1, ::1) count as one identity: after a port
+// fallback the OS may hold our own leftover entry under a different spelling, so
+// for a loopback caller only the port can tell another proxy from our own.
 func (d DetectedProxy) ConflictsWith(host string, port int) bool {
 	if !d.Enabled || !isLoopback(d.Host) {
 		return false
 	}
-	return !strings.EqualFold(d.Host, host) || d.Port != port
+	if d.Port != port {
+		return true
+	}
+	return !isLoopback(host)
+}
+
+// ProbeTimeout bounds Alive's connect attempt. A loopback connect or refusal
+// settles in microseconds; the margin only covers a heavily loaded machine.
+const ProbeTimeout = 300 * time.Millisecond
+
+// Alive reports whether something is accepting TCP connections at host:port. The
+// GUI uses it to tell a live conflicting proxy (never overwrite it) from the dead
+// leftover of a crashed run (safe to take over). It is a plain userspace dial —
+// for a "localhost" host Go tries each resolved loopback address within timeout.
+func Alive(host string, port int, timeout time.Duration) bool {
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), timeout)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 // Apply points the OS web proxy at s. The first call (no live backup on disk)
@@ -105,7 +138,7 @@ func (d DetectedProxy) ConflictsWith(host string, port int) bool {
 // failed Apply does not mean the OS was left untouched.
 func Apply(s Settings) error {
 	if !backupExists() {
-		b, err := capture()
+		b, err := osCapture()
 		if err != nil {
 			return err
 		}
@@ -116,7 +149,7 @@ func Apply(s Settings) error {
 			return err
 		}
 	}
-	return apply(s)
+	return osApply(s)
 }
 
 // Restore puts the OS proxy back to the snapshot taken by Apply and removes the
@@ -148,7 +181,7 @@ func restoreBackup() (bool, error) {
 	if b.OS != runtime.GOOS {
 		return false, deleteBackup()
 	}
-	if err := restore(b); err != nil {
+	if err := osRestore(b); err != nil {
 		return false, err
 	}
 	return true, deleteBackup()

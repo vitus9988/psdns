@@ -2,7 +2,9 @@ package sysproxy
 
 import (
 	"encoding/json"
+	"net"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -194,13 +196,45 @@ func TestDetectedProxyConflictsWith(t *testing.T) {
 		{"non-loopback", DetectedProxy{Enabled: true, Host: "10.0.0.1", Port: 3128}, false},
 		{"our own address", DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 8080}, false},
 		{"other loopback port", DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 9090}, true},
-		{"other loopback host", DetectedProxy{Enabled: true, Host: "::1", Port: 8080}, true},
-		{"localhost name", DetectedProxy{Enabled: true, Host: "localhost", Port: 9090}, true},
+		// Loopback spellings are one identity: only the port distinguishes another
+		// proxy from our own (possibly leftover) entry.
+		{"IPv6 loopback same port", DetectedProxy{Enabled: true, Host: "::1", Port: 8080}, false},
+		{"localhost name same port", DetectedProxy{Enabled: true, Host: "localhost", Port: 8080}, false},
+		{"IPv6 loopback other port", DetectedProxy{Enabled: true, Host: "::1", Port: 9090}, true},
+		{"localhost name other port", DetectedProxy{Enabled: true, Host: "localhost", Port: 9090}, true},
 	}
 	for _, tc := range tests {
 		if got := tc.d.ConflictsWith(ours.host, ours.port); got != tc.want {
 			t.Errorf("%s: ConflictsWith = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+	// A loopback entry never belongs to a non-loopback caller, even on the same port.
+	if !(DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 8080}).ConflictsWith("192.168.1.5", 8080) {
+		t.Error("loopback proxy vs non-loopback caller on the same port must conflict")
+	}
+}
+
+func TestAlive(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, portStr, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("port: %v", err)
+	}
+	if !Alive(host, port, ProbeTimeout) {
+		t.Error("Alive = false with a live listener")
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if Alive(host, port, ProbeTimeout) {
+		t.Error("Alive = true after the listener closed")
 	}
 }
 
