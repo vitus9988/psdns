@@ -238,6 +238,159 @@ func TestAlive(t *testing.T) {
 	}
 }
 
+// aliveNever/aliveAlways are fake probes for neutralizeStale tests; aliveNone
+// asserts the probe is not consulted at all.
+func aliveNever(string, int) bool  { return false }
+func aliveAlways(string, int) bool { return true }
+
+func TestNeutralizeStale(t *testing.T) {
+	ours := Settings{Host: "127.0.0.1", Port: 8080}
+
+	t.Run("windows own address disabled without probe", func(t *testing.T) {
+		in := Backup{Windows: &windowsBackup{
+			ProxyEnable: 1, ProxyEnableExisted: true,
+			ProxyServer: "http=127.0.0.1:8080;https=127.0.0.1:8080", ProxyServerExisted: true,
+		}}
+		got := neutralizeStale(in, ours, func(string, int) bool {
+			t.Fatal("probe must not run for our own address")
+			return true
+		})
+		if got.Windows.ProxyEnable != 0 {
+			t.Error("own-address entry must be disabled")
+		}
+		if !got.Windows.ProxyEnableExisted || !got.Windows.ProxyServerExisted {
+			t.Error("Existed flags must be preserved")
+		}
+		if in.Windows.ProxyEnable != 1 {
+			t.Error("input backup must not be mutated")
+		}
+	})
+
+	t.Run("windows dead loopback disabled", func(t *testing.T) {
+		in := Backup{Windows: &windowsBackup{ProxyEnable: 1, ProxyServer: "https=127.0.0.1:3128"}}
+		if got := neutralizeStale(in, ours, aliveNever); got.Windows.ProxyEnable != 0 {
+			t.Error("dead loopback entry must be disabled")
+		}
+	})
+
+	t.Run("windows live loopback kept", func(t *testing.T) {
+		in := Backup{Windows: &windowsBackup{ProxyEnable: 1, ProxyServer: "https=127.0.0.1:3128"}}
+		if got := neutralizeStale(in, ours, aliveAlways); got.Windows.ProxyEnable != 1 {
+			t.Error("live third-party loopback proxy must be kept as captured")
+		}
+	})
+
+	t.Run("windows non-loopback kept without probe", func(t *testing.T) {
+		in := Backup{Windows: &windowsBackup{ProxyEnable: 1, ProxyServer: "https=10.0.0.1:3128"}}
+		got := neutralizeStale(in, ours, func(string, int) bool {
+			t.Fatal("non-loopback entries must never be probed")
+			return false
+		})
+		if got.Windows.ProxyEnable != 1 {
+			t.Error("corporate (non-loopback) proxy must be kept as captured")
+		}
+	})
+
+	t.Run("windows disabled untouched", func(t *testing.T) {
+		in := Backup{Windows: &windowsBackup{ProxyEnable: 0, ProxyServer: "https=127.0.0.1:8080"}}
+		if got := neutralizeStale(in, ours, aliveNever); got.Windows.ProxyEnable != 0 {
+			t.Error("disabled entry must stay disabled")
+		}
+	})
+
+	t.Run("darwin per-entry", func(t *testing.T) {
+		in := Backup{Darwin: &darwinBackup{Services: []darwinService{
+			{
+				Name:       "Wi-Fi",
+				WebEnabled: true, WebServer: "127.0.0.1", WebPort: 8080, // ours -> off
+				SecureEnabled: true, SecureServer: "127.0.0.1", SecurePort: 3128, // live other -> kept
+				Bypass: []string{"*.local"},
+			},
+			{
+				Name:       "Ethernet",
+				WebEnabled: true, WebServer: "10.0.0.1", WebPort: 3128, // corporate -> kept
+			},
+		}}}
+		got := neutralizeStale(in, ours, aliveAlways)
+		wifi, eth := got.Darwin.Services[0], got.Darwin.Services[1]
+		if wifi.WebEnabled {
+			t.Error("Wi-Fi web entry (ours) must be disabled")
+		}
+		if !wifi.SecureEnabled {
+			t.Error("Wi-Fi secure entry (live other proxy) must be kept")
+		}
+		if !reflect.DeepEqual(wifi.Bypass, []string{"*.local"}) {
+			t.Error("Bypass must be preserved")
+		}
+		if !eth.WebEnabled {
+			t.Error("Ethernet corporate entry must be kept")
+		}
+		if !in.Darwin.Services[0].WebEnabled {
+			t.Error("input backup must not be mutated")
+		}
+	})
+
+	t.Run("linux manual stale becomes none", func(t *testing.T) {
+		in := Backup{Linux: &linuxBackup{Mode: "manual", HTTPSHost: "127.0.0.1", HTTPSPort: 8080}}
+		if got := neutralizeStale(in, ours, aliveNever); got.Linux.Mode != "none" {
+			t.Errorf("Mode = %q, want none", got.Linux.Mode)
+		}
+		if in.Linux.Mode != "manual" {
+			t.Error("input backup must not be mutated")
+		}
+	})
+
+	t.Run("linux manual live other kept", func(t *testing.T) {
+		in := Backup{Linux: &linuxBackup{Mode: "manual", HTTPSHost: "127.0.0.1", HTTPSPort: 3128}}
+		if got := neutralizeStale(in, ours, aliveAlways); got.Linux.Mode != "manual" {
+			t.Errorf("Mode = %q, want manual (live third-party proxy)", got.Linux.Mode)
+		}
+	})
+
+	t.Run("linux mode none untouched", func(t *testing.T) {
+		in := Backup{Linux: &linuxBackup{Mode: "none", HTTPSHost: "127.0.0.1", HTTPSPort: 8080}}
+		if got := neutralizeStale(in, ours, aliveNever); got.Linux.Mode != "none" {
+			t.Errorf("Mode = %q, want none", got.Linux.Mode)
+		}
+	})
+}
+
+func TestApplyNeutralizesPoisonedCapture(t *testing.T) {
+	redirectConfigDir(t)
+
+	// A crashed run (with its backup lost) left the OS pointing at 127.0.0.1:8080;
+	// this run bound 8080 again. The capture must not snapshot that leftover as
+	// the "original" state, or Stop would restore a dead proxy and cut the network.
+	origCapture, origApply := osCapture, osApply
+	t.Cleanup(func() { osCapture, osApply = origCapture, origApply })
+	var applied []Settings
+	osCapture = func() (Backup, error) {
+		return Backup{Windows: &windowsBackup{
+			ProxyEnable: 1, ProxyEnableExisted: true,
+			ProxyServer: "http=127.0.0.1:8080;https=127.0.0.1:8080", ProxyServerExisted: true,
+		}}, nil
+	}
+	osApply = func(s Settings) error { applied = append(applied, s); return nil }
+
+	s := Settings{Host: "127.0.0.1", Port: 8080}
+	if err := Apply(s); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(applied) != 1 || applied[0].Port != 8080 {
+		t.Fatalf("osApply calls = %+v, want one with port 8080", applied)
+	}
+	b, ok, err := readBackup()
+	if err != nil || !ok {
+		t.Fatalf("readBackup: ok=%v err=%v", ok, err)
+	}
+	if b.Windows == nil || b.Windows.ProxyEnable != 0 {
+		t.Errorf("backup ProxyEnable = %+v, want 0 (poisoned entry neutralized)", b.Windows)
+	}
+	if b.AppliedProxy != "127.0.0.1:8080" {
+		t.Errorf("AppliedProxy = %q", b.AppliedProxy)
+	}
+}
+
 func TestBackupRoundTrip(t *testing.T) {
 	b := Backup{
 		Version:      backupVersion,

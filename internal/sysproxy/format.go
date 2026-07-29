@@ -122,6 +122,61 @@ func currentFromBackup(b Backup) DetectedProxy {
 	return DetectedProxy{}
 }
 
+// staleEntry reports whether a captured proxy entry must not be restored as-is:
+// a loopback entry that is either the address Apply is about to serve (a remnant
+// of a previous psdns run — our own listener answers a probe, so liveness alone
+// could never clear it) or one nobody is listening on. Restoring either would
+// point the OS at a dead proxy and cut the network. Non-loopback entries (e.g. a
+// corporate proxy) are never stale and are never probed.
+func staleEntry(host string, port int, ours Settings, alive func(host string, port int) bool) bool {
+	if !isLoopback(host) {
+		return false
+	}
+	if port == ours.Port && isLoopback(ours.Host) {
+		return true
+	}
+	return !alive(host, port)
+}
+
+// neutralizeStale returns b with every stale proxy entry (see staleEntry)
+// flipped to disabled, so Restore/RecoverStale can only ever bring back a state
+// that works without us: a live third-party proxy is kept exactly as captured,
+// a dead leftover becomes "proxy off". The input backup is not mutated.
+func neutralizeStale(b Backup, ours Settings, alive func(host string, port int) bool) Backup {
+	switch {
+	case b.Windows != nil:
+		w := *b.Windows
+		if w.ProxyEnable == 1 {
+			if h, p, ok := parseWinINETProxyServer(w.ProxyServer); ok && staleEntry(h, p, ours, alive) {
+				w.ProxyEnable = 0
+			}
+		}
+		b.Windows = &w
+	case b.Darwin != nil:
+		d := darwinBackup{Services: append([]darwinService(nil), b.Darwin.Services...)}
+		for i, svc := range d.Services {
+			if svc.WebEnabled && staleEntry(svc.WebServer, svc.WebPort, ours, alive) {
+				d.Services[i].WebEnabled = false
+			}
+			if svc.SecureEnabled && staleEntry(svc.SecureServer, svc.SecurePort, ours, alive) {
+				d.Services[i].SecureEnabled = false
+			}
+		}
+		b.Darwin = &d
+	case b.Linux != nil:
+		l := *b.Linux
+		if l.Mode == "manual" {
+			// gsettings is one global setting; when the entry it would restore is
+			// stale, the only sane restore target is "no proxy".
+			if cur := currentFromBackup(b); cur.Enabled && staleEntry(cur.Host, cur.Port, ours, alive) {
+				l.Mode = "none"
+			}
+		}
+		b.Linux = &l
+	}
+	return b
+}
+
 // --- Linux (GNOME gsettings) ---
 
 // formatIgnoreHosts renders a bypass list as a GVariant string-array literal:

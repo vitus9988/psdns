@@ -142,6 +142,10 @@ func Apply(s Settings) error {
 		if err != nil {
 			return err
 		}
+		// Never snapshot a state that only "worked" because of us: a leftover
+		// entry pointing at our own address, or at a dead loopback proxy, is
+		// flipped to disabled so a later Restore cannot cut the network.
+		b = neutralizeStale(b, s, func(host string, port int) bool { return Alive(host, port, ProbeTimeout) })
 		b.Version = backupVersion
 		b.OS = runtime.GOOS
 		b.AppliedProxy = net.JoinHostPort(s.Host, strconv.Itoa(s.Port))
