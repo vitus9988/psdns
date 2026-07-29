@@ -55,6 +55,7 @@ var (
 	sysproxyRestore       = sysproxy.Restore
 	sysproxyRecoverStale  = sysproxy.RecoverStale
 	sysproxyCurrent       = sysproxy.Current
+	sysproxyAlive         = sysproxy.Alive
 	wailsEventsEmit       = wruntime.EventsEmit
 	wailsWindowHide       = wruntime.WindowHide
 	wailsWindowShow       = wruntime.WindowShow
@@ -119,8 +120,13 @@ func (a *App) Startup(ctx context.Context) {
 	a.startTray()
 	// A previous run may have crashed or been force-killed with the OS proxy
 	// still pointed at us; clean that up first so a fresh Start snapshots the
-	// real prior state. No-op on a clean start (no backup left behind).
-	if _, err := sysproxyRecoverStale(); err != nil {
+	// real prior state. No-op on a clean start (no backup left behind). Under
+	// sysproxyMu so it cannot interleave with an early Start's apply on the
+	// shared backup file.
+	a.sysproxyMu.Lock()
+	_, err := sysproxyRecoverStale()
+	a.sysproxyMu.Unlock()
+	if err != nil {
 		log.Printf("gui: stale system-proxy cleanup failed: %v", err)
 	}
 	bgCtx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
@@ -268,13 +274,18 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 		return
 	}
 	// Don't silently clobber another local filtering proxy (e.g. AdGuard): if the
-	// OS already routes web traffic through a *different* loopback proxy, applying
-	// would route around its filtering (its ad-blocking would stop working while
-	// psdns is on), so warn and skip. No backup is written and sysproxyOn stays
-	// false, so Stop/RecoverStale remain no-ops (no dead-proxy risk). A detection
-	// error is fail-open — Apply's own capture would surface the same failure. The
-	// user can turn off that app or the auto-set toggle and set psdns by hand.
-	if cur, derr := sysproxyCurrent(); derr == nil && cur.ConflictsWith(s.Host, s.Port) {
+	// OS already routes web traffic through a *different* loopback proxy that is
+	// actually accepting connections, applying would route around its filtering
+	// (its ad-blocking would stop working while psdns is on), so warn and skip.
+	// No backup is written and sysproxyOn stays false, so Stop/RecoverStale
+	// remain no-ops (no dead-proxy risk). A dead loopback entry is not worth
+	// protecting — it is the leftover of a crashed run (often our own, after a
+	// port fallback moved us off its port) and is taken over; Apply's capture
+	// hygiene keeps that dead state out of the backup. A detection error is
+	// fail-open — Apply's own capture would surface the same failure. The user
+	// can turn off that app or the auto-set toggle and set psdns by hand.
+	if cur, derr := sysproxyCurrent(); derr == nil && cur.ConflictsWith(s.Host, s.Port) &&
+		sysproxyAlive(cur.Host, cur.Port, sysproxy.ProbeTimeout) {
 		a.emitSysProxy("conflict", fmt.Sprintf(
 			"다른 로컬 프록시(%s)가 시스템 프록시로 설정돼 있어 자동 설정을 건너뛰었어요. "+
 				"그 앱(예: AdGuard)을 끄거나, '시스템 프록시 자동 설정'을 끄고 아래 주소를 직접 넣어 주세요.",

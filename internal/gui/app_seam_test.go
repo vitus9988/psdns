@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/vitus9988/psdns/internal/supervisor"
 	"github.com/vitus9988/psdns/internal/sysproxy"
@@ -182,26 +183,30 @@ func TestStartStopAppliesAndRestoresSystemProxy(t *testing.T) {
 	}
 }
 
-// TestStartSkipsSystemProxyOnConflict covers the AdGuard-conflict guard: when the
-// OS already routes web traffic through a *different* loopback proxy, psdns must
-// not overwrite it — Apply is never called, no restore is owed, and a conflict
-// toast tells the user why.
-func TestStartSkipsSystemProxyOnConflict(t *testing.T) {
-	redirectConfigDir(t)
-	events := recordEvents(t)
-	prevSup, prevApply, prevRestore, prevCur := sysproxySupported, sysproxyApply, sysproxyRestore, sysproxyCurrent
+// swapConflictSeams stubs the system-proxy seams for the conflict-guard tests:
+// supported, hermetic apply/restore recorders, a canned Current, and a canned
+// liveness probe. It returns the applied flag's address.
+func swapConflictSeams(t *testing.T, cur sysproxy.DetectedProxy, alive bool) (applied *bool) {
+	t.Helper()
+	prevSup, prevApply, prevRestore, prevCur, prevAlive :=
+		sysproxySupported, sysproxyApply, sysproxyRestore, sysproxyCurrent, sysproxyAlive
 	t.Cleanup(func() {
-		sysproxySupported, sysproxyApply, sysproxyRestore, sysproxyCurrent = prevSup, prevApply, prevRestore, prevCur
+		sysproxySupported, sysproxyApply, sysproxyRestore, sysproxyCurrent, sysproxyAlive =
+			prevSup, prevApply, prevRestore, prevCur, prevAlive
 	})
 	sysproxySupported = func() bool { return true }
-	applied := false
-	sysproxyApply = func(sysproxy.Settings) error { applied = true; return nil }
+	var did bool
+	sysproxyApply = func(sysproxy.Settings) error { did = true; return nil }
 	sysproxyRestore = func() error { return nil }
-	// Another local filtering proxy (e.g. AdGuard on 127.0.0.1:3128) is already set.
-	sysproxyCurrent = func() (sysproxy.DetectedProxy, error) {
-		return sysproxy.DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 3128}, nil
-	}
+	sysproxyCurrent = func() (sysproxy.DetectedProxy, error) { return cur, nil }
+	sysproxyAlive = func(string, int, time.Duration) bool { return alive }
+	return &did
+}
 
+// startConflictApp brings up a proxy-mode App on ephemeral ports with the
+// system-proxy auto-set left on (the default).
+func startConflictApp(t *testing.T) *App {
+	t.Helper()
 	a := NewApp("t")
 	a.setRuntimeContext(context.Background())
 	u := a.GetConfig() // SetSystemProxy stays on (the default)
@@ -213,15 +218,74 @@ func TestStartSkipsSystemProxyOnConflict(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _, _ = a.Stop() })
+	return a
+}
 
-	if applied {
-		t.Fatal("must not overwrite an existing local proxy")
+// TestStartSkipsSystemProxyOnConflict covers the AdGuard-conflict guard: when the
+// OS already routes web traffic through a *different, live* loopback proxy,
+// psdns must not overwrite it — Apply is never called, no restore is owed, and a
+// conflict toast tells the user why.
+func TestStartSkipsSystemProxyOnConflict(t *testing.T) {
+	redirectConfigDir(t)
+	events := recordEvents(t)
+	// Another local filtering proxy (e.g. AdGuard on 127.0.0.1:3128) is set and alive.
+	applied := swapConflictSeams(t, sysproxy.DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 3128}, true)
+
+	a := startConflictApp(t)
+
+	if *applied {
+		t.Fatal("must not overwrite an existing live local proxy")
 	}
 	if a.sysproxyOn {
 		t.Fatal("a skipped apply must not owe a restore")
 	}
 	if !slices.Contains(*events, "sysproxy:conflict") {
 		t.Fatalf("want sysproxy:conflict toast, got %v", *events)
+	}
+}
+
+// TestStartTakesOverDeadLoopbackProxy covers the leftover branch: a conflicting
+// loopback entry that nothing is listening on is the remnant of a crashed run,
+// so the auto-set proceeds instead of skipping.
+func TestStartTakesOverDeadLoopbackProxy(t *testing.T) {
+	redirectConfigDir(t)
+	events := recordEvents(t)
+	// The OS proxy points at 127.0.0.1:8080 but nothing answers there.
+	applied := swapConflictSeams(t, sysproxy.DetectedProxy{Enabled: true, Host: "127.0.0.1", Port: 8080}, false)
+
+	a := startConflictApp(t)
+
+	if !*applied {
+		t.Fatal("a dead loopback leftover must be taken over")
+	}
+	if !a.sysproxyOn {
+		t.Fatal("a take-over must owe a restore")
+	}
+	if slices.Contains(*events, "sysproxy:conflict") {
+		t.Fatalf("no conflict toast expected for a dead leftover, got %v", *events)
+	}
+	if !slices.Contains(*events, "sysproxy:applied") {
+		t.Fatalf("want sysproxy:applied toast, got %v", *events)
+	}
+}
+
+// TestProbeNotCalledWithoutConflict pins the probe's cost to the conflict path:
+// with no conflicting proxy detected there must be no liveness dial at all.
+func TestProbeNotCalledWithoutConflict(t *testing.T) {
+	redirectConfigDir(t)
+	recordEvents(t)
+	applied := swapConflictSeams(t, sysproxy.DetectedProxy{}, false)
+	sysproxyAlive = func(string, int, time.Duration) bool {
+		t.Error("liveness probe must not run without a detected conflict")
+		return false
+	}
+
+	a := startConflictApp(t)
+	if !a.sysproxyOn {
+		t.Fatal("apply must proceed without a conflict")
+	}
+	if !*applied {
+		t.Fatal("apply must have been called")
 	}
 }
 
