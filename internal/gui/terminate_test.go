@@ -3,11 +3,64 @@ package gui
 import (
 	"context"
 	"errors"
+	"os"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
 	"github.com/vitus9988/psdns/internal/supervisor"
 )
+
+// TestTerminationSignalRestoresAndExits covers the SIGTERM path: the OS proxy is
+// put back and the servers released before the process exits.
+func TestTerminationSignalRestoresAndExits(t *testing.T) {
+	recordEvents(t)
+	codes := recordExit(t)
+	restores := 0
+	prev := sysproxyRestore
+	sysproxyRestore = func() error { restores++; return nil }
+	t.Cleanup(func() { sysproxyRestore = prev })
+
+	a := &App{sup: supervisor.New(config.Default()), sysproxyOn: true}
+	a.setRuntimeContext(context.Background())
+
+	ch := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	go func() { a.awaitTerminationSignal(ch); close(done) }()
+	ch <- syscall.SIGTERM
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("signal handler did not finish")
+	}
+	if restores != 1 {
+		t.Fatalf("restore ran %d times, want 1", restores)
+	}
+	if len(*codes) != 1 || (*codes)[0] != 0 {
+		t.Fatalf("want a single exit(0), got %v", *codes)
+	}
+}
+
+// TestTerminationSignalIgnoresClosedChannel: a closed channel (no signal ever
+// arrived) must not tear anything down or exit.
+func TestTerminationSignalIgnoresClosedChannel(t *testing.T) {
+	codes := recordExit(t)
+	restores := 0
+	prev := sysproxyRestore
+	sysproxyRestore = func() error { restores++; return nil }
+	t.Cleanup(func() { sysproxyRestore = prev })
+
+	a := &App{sysproxyOn: true}
+	ch := make(chan os.Signal)
+	close(ch)
+	a.awaitTerminationSignal(ch)
+
+	if restores != 0 || len(*codes) != 0 {
+		t.Fatalf("closed channel must be inert, got %d restores and exits %v", restores, *codes)
+	}
+}
 
 // TestShutdownForTerminationRestoresOnce covers the teardown shared by the macOS
 // delegate quit (⌘Q / Dock / logout, see tray_darwin.go) and the signal handler:

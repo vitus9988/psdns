@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
@@ -98,6 +100,9 @@ type App struct {
 	// lost the guard, so Start refuses even if the exit is stubbed out.
 	instanceLock   *os.File
 	secondInstance atomic.Bool
+	// signalOnce keeps the SIGINT/SIGTERM handler to one installation, since
+	// Startup is the only caller but tests exercise it directly too.
+	signalOnce sync.Once
 }
 
 // NewApp builds the App. version is the GUI build version shown in the UI.
@@ -132,6 +137,7 @@ func (a *App) Startup(ctx context.Context) {
 		a.refuseSecondInstance()
 		return
 	}
+	a.installSignalHandler()
 	a.startTray()
 	// A previous run may have crashed or been force-killed with the OS proxy
 	// still pointed at us; clean that up first so a fresh Start snapshots the
@@ -425,6 +431,35 @@ func (a *App) restart() {
 	}
 	time.Sleep(restartDelay)
 	a.Quit()
+}
+
+// installSignalHandler arranges for a SIGINT/SIGTERM to restore the OS proxy and
+// release the ports before the process dies. Wails installs no signal handler of
+// its own, so without this a `kill`, a Ctrl-C on a terminal launch, or a Linux
+// session logout killed the app with the OS web proxy still pointed at us —
+// leaving the user's network settings changed until a later launch's
+// RecoverStale. On Windows SIGTERM is never delivered to a GUI process; the
+// delegate hook (macOS) and RecoverStale (everywhere) remain the backstops.
+func (a *App) installSignalHandler() {
+	a.signalOnce.Do(func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		go a.awaitTerminationSignal(ch)
+	})
+}
+
+// awaitTerminationSignal is installSignalHandler's body, split out so a test can
+// deliver a signal without one. It runs on its own goroutine and never touches
+// Wails, so it cannot interfere with the native main loop; the OS state is
+// already put back by the time the process exits.
+func (a *App) awaitTerminationSignal(ch <-chan os.Signal) {
+	sig, ok := <-ch
+	if !ok {
+		return
+	}
+	log.Printf("gui: %v received, restoring system settings before exit", sig)
+	a.shutdownForTermination()
+	exitFn(0)
 }
 
 // shutdownForTermination undoes everything this process owes the OS when it is
