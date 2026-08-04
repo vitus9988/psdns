@@ -261,6 +261,79 @@ func TestMatchesApplied(t *testing.T) {
 	}
 }
 
+// TestStillApplied covers the multi-service comparison RecoverStale relies on.
+// The macOS cases are the point: Apply writes every network service, so one
+// hand-fixed service must not make the rest look like the user's own setting.
+func TestStillApplied(t *testing.T) {
+	svc := func(name, server string, port int) darwinService {
+		return darwinService{
+			Name:       name,
+			WebEnabled: server != "", WebServer: server, WebPort: port,
+			SecureEnabled: server != "", SecureServer: server, SecurePort: port,
+		}
+	}
+	tests := []struct {
+		name    string
+		cur     Backup
+		applied string
+		want    bool
+	}{
+		{
+			name:    "darwin: user fixed only the first service",
+			cur:     Backup{Darwin: &darwinBackup{Services: []darwinService{svc("Wi-Fi", "", 0), svc("Ethernet", "127.0.0.1", 8080)}}},
+			applied: "127.0.0.1:8080",
+			want:    true,
+		},
+		{
+			name:    "darwin: user replaced every service",
+			cur:     Backup{Darwin: &darwinBackup{Services: []darwinService{svc("Wi-Fi", "10.0.0.9", 3128), svc("Ethernet", "10.0.0.9", 3128)}}},
+			applied: "127.0.0.1:8080",
+			want:    false,
+		},
+		{
+			name:    "darwin: all ours, loopback alias",
+			cur:     Backup{Darwin: &darwinBackup{Services: []darwinService{svc("Wi-Fi", "localhost", 8080)}}},
+			applied: "127.0.0.1:8080",
+			want:    true,
+		},
+		{
+			name:    "darwin: everything off",
+			cur:     Backup{Darwin: &darwinBackup{Services: []darwinService{svc("Wi-Fi", "", 0)}}},
+			applied: "127.0.0.1:8080",
+			want:    false,
+		},
+		{
+			name:    "windows: still ours",
+			cur:     Backup{Windows: &windowsBackup{ProxyEnable: 1, ProxyServer: "http=127.0.0.1:8080;https=127.0.0.1:8080"}},
+			applied: "127.0.0.1:8080",
+			want:    true,
+		},
+		{
+			name:    "windows: user changed it",
+			cur:     Backup{Windows: &windowsBackup{ProxyEnable: 1, ProxyServer: "http=10.0.0.9:3128"}},
+			applied: "127.0.0.1:8080",
+			want:    false,
+		},
+		{
+			name:    "linux: still ours",
+			cur:     Backup{Linux: &linuxBackup{Mode: "manual", HTTPHost: "127.0.0.1", HTTPPort: 8080, HTTPSHost: "127.0.0.1", HTTPSPort: 8080}},
+			applied: "127.0.0.1:8080",
+			want:    true,
+		},
+		{
+			name:    "linux: proxy off",
+			cur:     Backup{Linux: &linuxBackup{Mode: "none"}},
+			applied: "127.0.0.1:8080",
+			want:    false,
+		},
+	}
+	for _, tc := range tests {
+		if got := stillApplied(tc.cur, tc.applied); got != tc.want {
+			t.Errorf("%s: stillApplied = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // aliveNever/aliveAlways are fake probes for neutralizeStale tests; aliveNone
 // asserts the probe is not consulted at all.
 func aliveNever(string, int) bool  { return false }

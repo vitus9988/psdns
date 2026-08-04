@@ -20,6 +20,12 @@ type fakeNetworksetup struct {
 	webProxy string // canned -getwebproxy / -getsecurewebproxy output
 	failCmd  string
 	failOut  string
+	// services and perService model a machine with more than one network
+	// service, which is where Apply writes to all of them and a per-service
+	// difference matters. Both are optional; empty means the single-Wi-Fi
+	// machine above and webProxy for every service.
+	services   []string
+	perService map[string]string
 }
 
 func (f *fakeNetworksetup) install(t *testing.T) {
@@ -36,8 +42,15 @@ func (f *fakeNetworksetup) install(t *testing.T) {
 		}
 		switch args[0] {
 		case "-listallnetworkservices":
-			return []byte("An asterisk (*) denotes that a network service is disabled.\nWi-Fi\n*Bluetooth PAN\n"), nil
+			out := "An asterisk (*) denotes that a network service is disabled.\n"
+			if len(f.services) == 0 {
+				return []byte(out + "Wi-Fi\n*Bluetooth PAN\n"), nil
+			}
+			return []byte(out + strings.Join(f.services, "\n") + "\n"), nil
 		case "-getwebproxy", "-getsecurewebproxy":
+			if state, ok := f.perService[args[1]]; ok {
+				return []byte(state), nil
+			}
 			return []byte(f.webProxy), nil
 		case "-getproxybypassdomains":
 			return []byte("*.local\n"), nil
@@ -207,6 +220,82 @@ func TestRecoverStaleRestoresMatchingOS(t *testing.T) {
 	}
 	if !reflect.DeepEqual(setCalls, wantCalls) {
 		t.Errorf("restore sequence:\n got %v\nwant %v", setCalls, wantCalls)
+	}
+}
+
+// TestRecoverStaleRestoresWhenOnlyOneServiceWasFixed is the multi-service case:
+// after a crash the user repointed Wi-Fi at their own proxy but Ethernet still
+// holds psdns's dead address. The cleanup is still owed — dropping the backup
+// here would leave Ethernet pointing at nothing with no recovery data left.
+func TestRecoverStaleRestoresWhenOnlyOneServiceWasFixed(t *testing.T) {
+	redirectConfigDir(t)
+	fake := &fakeNetworksetup{
+		services: []string{"Wi-Fi", "Ethernet"},
+		perService: map[string]string{
+			"Wi-Fi":    "Enabled: Yes\nServer: 10.0.0.9\nPort: 3128\n",  // user's own, hand-fixed
+			"Ethernet": "Enabled: Yes\nServer: 127.0.0.1\nPort: 8080\n", // still ours
+		},
+	}
+	fake.install(t)
+
+	b := Backup{
+		Version:      backupVersion,
+		OS:           runtime.GOOS,
+		AppliedProxy: "127.0.0.1:8080",
+		Darwin: &darwinBackup{Services: []darwinService{
+			{Name: "Wi-Fi"},
+			{Name: "Ethernet"},
+		}},
+	}
+	if err := writeBackup(b); err != nil {
+		t.Fatalf("writeBackup: %v", err)
+	}
+	recovered, err := RecoverStale()
+	if err != nil {
+		t.Fatalf("RecoverStale: %v", err)
+	}
+	if !recovered {
+		t.Fatal("a service still holding our address means the cleanup is still owed")
+	}
+	if backupExists() {
+		t.Error("recovered backup must be deleted")
+	}
+}
+
+// TestRecoverStaleDropsBackupWhenNoServiceIsOurs is the other half: nothing in
+// the OS points at us any more, so the user's setting is respected and only the
+// backup is dropped.
+func TestRecoverStaleDropsBackupWhenNoServiceIsOurs(t *testing.T) {
+	redirectConfigDir(t)
+	fake := &fakeNetworksetup{
+		services: []string{"Wi-Fi", "Ethernet"},
+		webProxy: "Enabled: Yes\nServer: 10.0.0.9\nPort: 3128\n",
+	}
+	fake.install(t)
+
+	b := Backup{
+		Version:      backupVersion,
+		OS:           runtime.GOOS,
+		AppliedProxy: "127.0.0.1:8080",
+		Darwin:       &darwinBackup{Services: []darwinService{{Name: "Wi-Fi"}, {Name: "Ethernet"}}},
+	}
+	if err := writeBackup(b); err != nil {
+		t.Fatalf("writeBackup: %v", err)
+	}
+	recovered, err := RecoverStale()
+	if err != nil {
+		t.Fatalf("RecoverStale: %v", err)
+	}
+	if recovered {
+		t.Fatal("must not clobber a setting the user changed after the crash")
+	}
+	if backupExists() {
+		t.Error("the stale backup must be dropped")
+	}
+	for _, c := range fake.calls {
+		if strings.HasPrefix(c[0], "-set") {
+			t.Fatalf("nothing may be written when the user's change is respected, got %v", c)
+		}
 	}
 }
 

@@ -179,10 +179,10 @@ func DisableApplied() error { return osDisable() }
 // RecoverStale restores a backup left by a previous run that exited without
 // restoring (a crash or force-kill). On a clean start there is no backup and it
 // does nothing. Unlike Restore — the in-session stop path, which always owes its
-// restore — arbitrary time has passed since the crash: when the OS proxy no
-// longer matches what that run applied (the user or another app changed it in
-// the meantime), restoring the old snapshot would clobber that change, so the
-// backup is only dropped. A detection error falls open to restoring, matching
+// restore — arbitrary time has passed since the crash: when nothing in the OS
+// state still points at what that run applied (the user or another app changed
+// it in the meantime), restoring the old snapshot would clobber that change, so
+// the backup is only dropped. A detection error falls open to restoring, matching
 // the conflict guard's stance; a legacy backup without AppliedProxy restores as
 // before. Returns whether a stale backup was actually recovered.
 func RecoverStale() (bool, error) {
@@ -197,7 +197,11 @@ func RecoverStale() (bool, error) {
 		return false, deleteBackup()
 	}
 	if b.AppliedProxy != "" {
-		if cur, cerr := Current(); cerr == nil && !matchesApplied(cur, b.AppliedProxy) {
+		// Compare against the whole captured state, not just the one proxy
+		// currentFromBackup picks out: on macOS Apply wrote every network service,
+		// and any service still holding our address means this cleanup is still
+		// owed (see stillApplied).
+		if cur, cerr := osCapture(); cerr == nil && !stillApplied(cur, b.AppliedProxy) {
 			return false, deleteBackup()
 		}
 	}

@@ -136,6 +136,35 @@ func matchesApplied(cur DetectedProxy, applied string) bool {
 	return strings.EqualFold(cur.Host, h)
 }
 
+// stillApplied reports whether the OS state cur still holds the proxy a crashed
+// session applied, anywhere it applied it. RecoverStale uses it to tell "our
+// leftover is still there, clean it up" from "the user has moved on, leave them
+// alone".
+//
+// It exists because currentFromBackup collapses a snapshot to a single proxy —
+// on macOS, the first enabled network service. Apply writes every service, so a
+// user who fixed only one of them by hand after a crash (say Wi-Fi, while
+// Ethernet and a Thunderbolt bridge still point at psdns) looked like a user who
+// had changed everything: the backup was dropped without a restore and the other
+// services were left pointing at a dead proxy with the recovery data gone. Any
+// service still holding our address means the cleanup is still owed.
+func stillApplied(cur Backup, applied string) bool {
+	if cur.Darwin == nil {
+		return matchesApplied(currentFromBackup(cur), applied)
+	}
+	for _, s := range cur.Darwin.Services {
+		if s.SecureEnabled && s.SecureServer != "" && s.SecurePort > 0 &&
+			matchesApplied(DetectedProxy{Enabled: true, Host: s.SecureServer, Port: s.SecurePort}, applied) {
+			return true
+		}
+		if s.WebEnabled && s.WebServer != "" && s.WebPort > 0 &&
+			matchesApplied(DetectedProxy{Enabled: true, Host: s.WebServer, Port: s.WebPort}, applied) {
+			return true
+		}
+	}
+	return false
+}
+
 // staleEntry reports whether a captured proxy entry must not be restored as-is:
 // a loopback entry that is either the address Apply is about to serve (a remnant
 // of a previous psdns run — our own listener answers a probe, so liveness alone
