@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -241,8 +242,12 @@ func (a *App) GetStatus() supervisor.State { return a.sup.Status() }
 
 // Start brings up the servers for mode ("proxy"|"resolve"|"run"). On a caller
 // error (already running, invalid mode, bad config) the promise rejects with a
-// friendly message; bind failures instead arrive in the resolved State's
-// Listeners[].Err.
+// friendly message. A partial bind failure resolves normally and arrives in the
+// State's Listeners[].Err, so the UI can report "some listeners failed" while
+// the rest keep working — but when *nothing* came up the servers are stopped
+// again and the error is returned, so the UI does not show a running session
+// that is bound to nothing (which is how a duplicate instance fighting over :53
+// looked like a successful start).
 func (a *App) Start(mode string) (supervisor.State, error) {
 	if a.secondInstance.Load() {
 		return a.sup.Status(), errors.New("이미 다른 psdns 가 실행 중이에요. 그 창에서 켜 주세요.")
@@ -251,8 +256,35 @@ func (a *App) Start(mode string) (supervisor.State, error) {
 		return a.sup.Status(), friendlyStartErr(err)
 	}
 	st := a.sup.WaitSettled(settleDelay)
+	if msg, allFailed := allListenersFailed(st); allFailed {
+		_ = a.sup.Stop()
+		return a.sup.Status(), errors.New(msg)
+	}
 	a.maybeApplySystemProxy(st)
 	return st, nil
+}
+
+// allListenersFailed reports whether every listener of a just-started session is
+// down, and returns the reasons (already friendly, from classifyBindErr) to show.
+// A session with no listeners at all is not treated as failed — that is not a
+// state Start produces, and guessing would turn an unknown into a false error.
+func allListenersFailed(st supervisor.State) (string, bool) {
+	if len(st.Listeners) == 0 {
+		return "", false
+	}
+	var msgs []string
+	for _, l := range st.Listeners {
+		if l.Up {
+			return "", false
+		}
+		if l.Err != "" {
+			msgs = append(msgs, l.Err)
+		}
+	}
+	if len(msgs) == 0 {
+		msgs = append(msgs, "서버를 시작하지 못했어요.")
+	}
+	return strings.Join(msgs, "\n"), true
 }
 
 // Stop tears down all servers. The system proxy is restored before the servers
@@ -267,7 +299,7 @@ func (a *App) Stop() (supervisor.State, error) {
 	err := a.sup.Stop()
 	a.sysproxyMu.Unlock()
 	if err != nil {
-		return a.sup.Status(), err
+		return a.sup.Status(), friendlyStopErr(err)
 	}
 	return a.sup.Status(), nil
 }
@@ -573,4 +605,14 @@ func friendlyStartErr(err error) error {
 	default:
 		return err
 	}
+}
+
+// friendlyStopErr keeps the supervisor's internal wording out of the UI: a stray
+// Stop (double click, or a Start that already rolled itself back) would otherwise
+// surface the raw "supervisor: not running".
+func friendlyStopErr(err error) error {
+	if errors.Is(err, supervisor.ErrNotRunning) {
+		return errors.New("이미 꺼져 있어요.")
+	}
+	return err
 }
