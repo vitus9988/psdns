@@ -6,6 +6,7 @@
 package supervisor
 
 import (
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -167,7 +168,9 @@ func (s *Supervisor) Stop() error {
 		_ = s.sock.Close()
 	}
 	if s.dns != nil {
-		s.dns.Shutdown()
+		if err := s.dns.Shutdown(); err != nil {
+			log.Printf("supervisor: dns shutdown: %v", err)
+		}
 	}
 	s.http, s.sock, s.dns = nil, nil, nil
 	// Drop the stale listener snapshot so Status stops reporting the (now

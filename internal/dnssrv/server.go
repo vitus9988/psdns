@@ -5,8 +5,11 @@ package dnssrv
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -20,6 +23,16 @@ type Server struct {
 	addr    string
 	udp     *dns.Server
 	tcp     *dns.Server
+
+	// The bound sockets are kept here (guarded by mu, with closed for
+	// idempotence) so Shutdown can close them itself: miekg's Shutdown is a
+	// no-op until its serve loop has flagged the server as started, so a
+	// Shutdown racing ListenAndServe would otherwise leave the port bound in
+	// this process forever.
+	mu     sync.Mutex
+	pc     net.PacketConn
+	ln     net.Listener
+	closed bool
 }
 
 // New builds a server listening on addr (host:port).
@@ -93,23 +106,74 @@ func (s *Server) ListenAndServe() error {
 		_ = pc.Close()
 		return err
 	}
+	s.mu.Lock()
+	if s.closed {
+		// Shutdown won the race: release the sockets we just bound and report
+		// a clean close instead of serving on our way out.
+		s.mu.Unlock()
+		_ = pc.Close()
+		_ = ln.Close()
+		return net.ErrClosed
+	}
+	s.pc, s.ln = pc, ln
 	s.udp.PacketConn = pc
 	s.tcp.Listener = ln
+	s.mu.Unlock()
 
 	errCh := make(chan error, 2)
 	go func() { errCh <- s.udp.ActivateAndServe() }()
 	go func() { errCh <- s.tcp.ActivateAndServe() }()
 	err = <-errCh
-	s.Shutdown()
+	_ = s.Shutdown()
 	return err
 }
 
-// Shutdown stops both listeners.
-func (s *Server) Shutdown() {
+// Shutdown stops both listeners and releases their ports. It is idempotent and
+// safe to call at any point relative to ListenAndServe: the bound sockets are
+// closed directly first, because miekg's Shutdown does nothing (and closes
+// nothing) before its serve loop has marked the server started — relying on it
+// alone would leak the port inside this process when a stop lands in that
+// window.
+func (s *Server) Shutdown() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	pc, ln := s.pc, s.ln
+	s.mu.Unlock()
+
+	var firstErr error
+	record := func(err error) {
+		if err != nil && firstErr == nil && !errors.Is(err, net.ErrClosed) {
+			firstErr = err
+		}
+	}
+	if ln != nil {
+		record(ln.Close())
+	}
+	if pc != nil {
+		record(pc.Close())
+	}
+	// Let miekg unwind its own state and wait out in-flight handlers. "server
+	// not started" only means we won the race above and there was nothing
+	// serving yet.
 	if s.udp != nil {
-		_ = s.udp.Shutdown()
+		if err := s.udp.Shutdown(); err != nil && !isNotStarted(err) {
+			record(err)
+		}
 	}
 	if s.tcp != nil {
-		_ = s.tcp.Shutdown()
+		if err := s.tcp.Shutdown(); err != nil && !isNotStarted(err) {
+			record(err)
+		}
 	}
+	return firstErr
+}
+
+// isNotStarted matches miekg/dns's "server not started" Shutdown error, which
+// it exposes only as text (no sentinel as of v1.1.72).
+func isNotStarted(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "server not started")
 }
