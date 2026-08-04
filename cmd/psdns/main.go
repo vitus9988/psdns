@@ -196,7 +196,7 @@ func runResolve(args []string) {
 	maybeStartPprof()
 
 	srv := dnssrv.New(mustDoH(c), c.DNSListen, c.Timeout)
-	go onSignal(srv.Shutdown)
+	go onSignal(func() { _ = srv.Shutdown() })
 	log.Printf("psdns resolve: DNS on %s -> DoH %s", c.DNSListen, dohSummary(c))
 	if err := srv.ListenAndServe(); err != nil {
 		logFatalf("dns server: %v", err)
@@ -249,7 +249,7 @@ func runAll(args []string) {
 	go func() { errCh <- dsrv.ListenAndServe() }()
 	go func() { errCh <- hp.ListenAndServe() }()
 	go func() { errCh <- sp.ListenAndServe() }()
-	go onSignal(func() { dsrv.Shutdown(); _ = hp.Close(); _ = sp.Close() })
+	go onSignal(func() { _ = dsrv.Shutdown(); _ = hp.Close(); _ = sp.Close() })
 	log.Printf("psdns run: DNS %s | HTTP %s | SOCKS5 %s | frag=%s -> DoH %s", c.DNSListen, c.ProxyListen, c.SocksListen, c.Frag, dohSummary(c))
 	go notifyUpdate()
 	logFatal(<-errCh)

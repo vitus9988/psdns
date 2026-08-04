@@ -92,6 +92,12 @@ type App struct {
 	// restore is a no-op unless we changed it. It is set before Apply touches the
 	// OS, so even a partial apply failure is still undone by this session's Stop.
 	sysproxyOn bool
+
+	// instanceLock is the held single-instance lock file (see instancelock.go);
+	// nil when the guard was skipped. secondInstance records that this process
+	// lost the guard, so Start refuses even if the exit is stubbed out.
+	instanceLock   *os.File
+	secondInstance atomic.Bool
 }
 
 // NewApp builds the App. version is the GUI build version shown in the UI.
@@ -117,6 +123,15 @@ func NewApp(version string) *App {
 // context and starts a one-shot background update check.
 func (a *App) Startup(ctx context.Context) {
 	a.setRuntimeContext(ctx)
+	// Before anything else, and specifically before RecoverStale: a duplicate
+	// launch that got past Wails's own SingleInstanceLock (see instancelock.go)
+	// must not clean up "stale" state that a live instance still owns, and must
+	// not go on to fight it for :53.
+	if !a.acquireInstanceLock() {
+		a.secondInstance.Store(true)
+		a.refuseSecondInstance()
+		return
+	}
 	a.startTray()
 	// A previous run may have crashed or been force-killed with the OS proxy
 	// still pointed at us; clean that up first so a fresh Start snapshots the
@@ -168,6 +183,7 @@ func (a *App) Shutdown(ctx context.Context) {
 			log.Printf("gui: server shutdown: %v", err)
 		}
 	}
+	a.releaseInstanceLock()
 	a.setRuntimeContext(nil)
 }
 
@@ -212,6 +228,9 @@ func (a *App) GetStatus() supervisor.State { return a.sup.Status() }
 // friendly message; bind failures instead arrive in the resolved State's
 // Listeners[].Err.
 func (a *App) Start(mode string) (supervisor.State, error) {
+	if a.secondInstance.Load() {
+		return a.sup.Status(), errors.New("이미 다른 psdns 가 실행 중이에요. 그 창에서 켜 주세요.")
+	}
 	if err := a.sup.Start(supervisor.Mode(mode)); err != nil {
 		return a.sup.Status(), friendlyStartErr(err)
 	}
