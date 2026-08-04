@@ -78,6 +78,9 @@ type App struct {
 	// bgCancel cancels the in-flight startup update check so Shutdown can stop
 	// it rather than let it run (and emit) against a torn-down context.
 	bgCancel context.CancelFunc
+	// startupNotice holds a message raised before the frontend could listen for
+	// events; the UI collects it via StartupNotice during init. Guarded by ctxMu.
+	startupNotice string
 
 	// quitting distinguishes a real quit (tray "종료하기" / the in-app button,
 	// which route through Quit) from the window's close button: BeforeClose
@@ -150,6 +153,12 @@ func (a *App) Startup(ctx context.Context) {
 	a.sysproxyMu.Unlock()
 	if err != nil {
 		log.Printf("gui: stale system-proxy cleanup failed: %v", err)
+		// A failure here means a previous run's OS proxy may still be in place —
+		// the user's network may be routed through a proxy that no longer exists.
+		// Park it for the frontend to pick up rather than emitting: at Startup the
+		// frontend has not yet subscribed, so an event would be lost.
+		a.setStartupNotice("이전 실행이 남긴 시스템 프록시 설정을 정리하지 못했어요. " +
+			"인터넷이 안 되면 OS 네트워크 설정에서 프록시를 꺼 주세요.")
 	}
 	bgCtx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
 	a.setBackgroundCancel(cancel)
@@ -369,6 +378,25 @@ func (a *App) restoreSystemProxyLocked() {
 	}
 	a.sysproxyOn = false
 	a.emitSysProxy("restored", "시스템 프록시를 원래대로 되돌렸어요")
+}
+
+// StartupNotice returns a message about something that went wrong before the UI
+// existed (currently: stale system-proxy cleanup failed), and clears it so it is
+// shown once. The frontend polls this during init instead of listening for an
+// event, because Startup runs before the frontend subscribes and an event there
+// would go nowhere.
+func (a *App) StartupNotice() string {
+	a.ctxMu.Lock()
+	defer a.ctxMu.Unlock()
+	n := a.startupNotice
+	a.startupNotice = ""
+	return n
+}
+
+func (a *App) setStartupNotice(msg string) {
+	a.ctxMu.Lock()
+	a.startupNotice = msg
+	a.ctxMu.Unlock()
 }
 
 // SystemProxySupported reports whether OS web-proxy automation is available on

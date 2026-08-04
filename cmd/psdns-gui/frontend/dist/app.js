@@ -34,6 +34,7 @@
     CheckUpdate: async () => ({ current: "dev", latest: "", newer: false }),
     ApplyUpdate: async () => { throw "업데이트 자동 설치는 곧 제공될 예정이에요."; },
     SystemProxySupported: async () => true,
+    StartupNotice: async () => "",
     Quit: async () => {},
   };
 
@@ -492,6 +493,15 @@
           const card = $("sysProxyCard");
           if (card) card.hidden = !supported;
         } catch (e) { /* older backend: leave the card visible */ }
+      }
+      // Anything that went wrong before the UI existed (a failed cleanup of a
+      // previous run's OS proxy) is parked on the backend, since an event emitted
+      // during Startup would have had no listener yet.
+      if (app.StartupNotice) {
+        try {
+          const notice = await app.StartupNotice();
+          if (notice) showSysProxyNotice(notice);
+        } catch (e) { /* older backend: nothing parked */ }
       }
     } catch (e) {
       showError("초기화에 실패했어요: " + String(e.message || e));

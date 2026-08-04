@@ -383,7 +383,35 @@ func TestStartupLogsStaleCleanupFailure(t *testing.T) {
 	a := NewApp("t")
 	a.updater = stubErrChecker()
 	a.Startup(context.Background())
+	// The failure must reach the user: at Startup the frontend has not subscribed
+	// yet, so it is parked for init to collect (and handed out exactly once).
+	notice := a.StartupNotice()
+	if notice == "" {
+		t.Fatal("a failed stale cleanup must leave a notice for the UI")
+	}
+	if again := a.StartupNotice(); again != "" {
+		t.Fatalf("notice must be shown once, got %q on the second read", again)
+	}
 	a.trayEnd = func() {} // never run the real external-loop end hook
+	a.Shutdown(context.Background())
+}
+
+// TestStartupLeavesNoNoticeOnCleanStart: the common case (nothing stale) must not
+// raise a banner.
+func TestStartupLeavesNoNoticeOnCleanStart(t *testing.T) {
+	redirectConfigDir(t)
+	useTempLock(t)
+	prev := sysproxyRecoverStale
+	sysproxyRecoverStale = func() (bool, error) { return false, nil }
+	t.Cleanup(func() { sysproxyRecoverStale = prev })
+
+	a := NewApp("t")
+	a.updater = stubErrChecker()
+	a.Startup(context.Background())
+	if n := a.StartupNotice(); n != "" {
+		t.Fatalf("clean start must raise no notice, got %q", n)
+	}
+	a.trayEnd = func() {}
 	a.Shutdown(context.Background())
 }
 
