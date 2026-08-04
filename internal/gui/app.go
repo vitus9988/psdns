@@ -427,6 +427,22 @@ func (a *App) restart() {
 	a.Quit()
 }
 
+// shutdownForTermination undoes everything this process owes the OS when it is
+// about to die without Wails's OnShutdown running: a macOS ⌘Q / Dock quit /
+// logout (see tray_darwin.go — systray replaces Wails's app delegate, so those
+// paths bypass OnShutdown entirely) or a SIGINT/SIGTERM. It is deliberately
+// Wails-free and idempotent: sysproxyOn makes the restore run exactly once, and
+// a second Stop just reports ErrNotRunning. quitting is set so a close event
+// racing us cannot be turned into a hide-to-tray.
+func (a *App) shutdownForTermination() {
+	a.quitting.Store(true)
+	a.restoreSystemProxy()
+	if a.sup != nil {
+		_ = a.sup.Stop()
+	}
+	a.releaseInstanceLock()
+}
+
 // Quit stops servers and closes the app. Setting quitting first tells
 // BeforeClose to allow the close instead of hiding to the tray.
 func (a *App) Quit() {

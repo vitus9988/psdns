@@ -34,6 +34,11 @@ var (
 // startTray builds the tray icon and menu and starts systray. Safe to call from
 // Startup: it never blocks. See stopTray for the matching teardown.
 func (a *App) startTray() {
+	// Must be set before systray takes over the app delegate on macOS, since that
+	// is what routes an OS-driven quit (⌘Q, Dock, logout) back into our teardown
+	// (see tray_darwin.go). No-op elsewhere.
+	setTerminateHandler(a.shutdownForTermination)
+
 	onReady := func() {
 		applyTrayIcon()
 		systray.SetTooltip("psdns")
