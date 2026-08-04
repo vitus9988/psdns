@@ -19,7 +19,7 @@ func TestTerminationSignalRestoresAndExits(t *testing.T) {
 	codes := recordExit(t)
 	restores := 0
 	prev := sysproxyRestore
-	sysproxyRestore = func() error { restores++; return nil }
+	sysproxyRestore = func() (bool, error) { restores++; return true, nil }
 	t.Cleanup(func() { sysproxyRestore = prev })
 
 	a := &App{sup: supervisor.New(config.Default()), sysproxyOn: true}
@@ -49,7 +49,7 @@ func TestTerminationSignalIgnoresClosedChannel(t *testing.T) {
 	codes := recordExit(t)
 	restores := 0
 	prev := sysproxyRestore
-	sysproxyRestore = func() error { restores++; return nil }
+	sysproxyRestore = func() (bool, error) { restores++; return true, nil }
 	t.Cleanup(func() { sysproxyRestore = prev })
 
 	a := &App{sysproxyOn: true}
@@ -70,7 +70,7 @@ func TestShutdownForTerminationRestoresOnce(t *testing.T) {
 	recordEvents(t)
 	restores := 0
 	prev := sysproxyRestore
-	sysproxyRestore = func() error { restores++; return nil }
+	sysproxyRestore = func() (bool, error) { restores++; return true, nil }
 	t.Cleanup(func() { sysproxyRestore = prev })
 
 	a := &App{sup: supervisor.New(config.Default()), sysproxyOn: true}

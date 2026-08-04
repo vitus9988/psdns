@@ -55,6 +55,7 @@ var (
 	sysproxySupported     = sysproxy.Supported
 	sysproxyApply         = sysproxy.Apply
 	sysproxyRestore       = sysproxy.Restore
+	sysproxyDisable       = sysproxy.DisableApplied
 	sysproxyRecoverStale  = sysproxy.RecoverStale
 	sysproxyCurrent       = sysproxy.Current
 	sysproxyAlive         = sysproxy.Alive
@@ -346,8 +347,24 @@ func (a *App) restoreSystemProxyLocked() {
 	if !a.sysproxyOn {
 		return
 	}
-	if err := sysproxyRestore(); err != nil {
+	restored, err := sysproxyRestore()
+	if err != nil {
 		a.emitSysProxy("error", "시스템 프록시를 원래대로 되돌리지 못했어요. 네트워크 설정을 확인해 주세요.")
+		return
+	}
+	if !restored {
+		// We applied (sysproxyOn) but the snapshot is gone — deleted as corrupt,
+		// removed by a cleanup tool, or consumed by a duplicate instance. Treating
+		// that as success is what used to leave the OS pointed at a listener that
+		// is about to close, with no backup left for the next launch to recover
+		// from, i.e. an internet outage the user has to fix by hand. We cannot
+		// reproduce their previous setting, but we can stop routing through us.
+		if derr := sysproxyDisable(); derr != nil {
+			a.emitSysProxy("error", "시스템 프록시 원복 정보가 사라져 자동 복원에 실패했어요. OS 설정에서 프록시를 직접 꺼 주세요.")
+			return
+		}
+		a.sysproxyOn = false
+		a.emitSysProxy("restored", "원복 정보가 사라져 시스템 프록시를 껐어요. 이전에 쓰던 프록시가 있었다면 다시 지정해 주세요.")
 		return
 	}
 	a.sysproxyOn = false

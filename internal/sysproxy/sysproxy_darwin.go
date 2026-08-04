@@ -81,6 +81,25 @@ func restore(b Backup) error {
 	return firstErr
 }
 
+// disable turns the web + secure web proxy off on every service. apply set them
+// all, so all of them are ours to switch off (see DisableApplied for when this
+// runs instead of restore).
+func disable() error {
+	services, err := listNetworkServices()
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, svc := range services {
+		for _, args := range disableDarwinArgs(svc) {
+			if out, err := runCmd("networksetup", args...); err != nil && firstErr == nil {
+				firstErr = classifyDarwinErr(err, out)
+			}
+		}
+	}
+	return firstErr
+}
+
 // applyDarwinArgs is the pure list of networksetup invocations to point svc at
 // host:port (web + secure web) and set the bypass domains.
 func applyDarwinArgs(svc, host, port string, bypass []string) [][]string {
@@ -125,6 +144,16 @@ func restoreDarwinArgs(svc darwinService) [][]string {
 		cmds = append(cmds, []string{"-setproxybypassdomains", svc.Name, "Empty"})
 	}
 	return cmds
+}
+
+// disableDarwinArgs is the pure list of networksetup invocations to switch svc's
+// web + secure web proxy off, leaving the stored server address alone (there is
+// no captured state to put back here).
+func disableDarwinArgs(svc string) [][]string {
+	return [][]string{
+		{"-setwebproxystate", svc, "off"},
+		{"-setsecurewebproxystate", svc, "off"},
+	}
 }
 
 func listNetworkServices() ([]string, error) {

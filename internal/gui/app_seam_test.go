@@ -133,7 +133,7 @@ func TestStartStopAppliesAndRestoresSystemProxy(t *testing.T) {
 	// the default would shell out to the OS to read the real proxy state).
 	sysproxyCurrent = func() (sysproxy.DetectedProxy, error) { return sysproxy.DetectedProxy{}, nil }
 	restored := 0
-	sysproxyRestore = func() error { restored++; return nil }
+	sysproxyRestore = func() (bool, error) { restored++; return true, nil }
 
 	newApp := func(t *testing.T) *App {
 		a := NewApp("t")
@@ -197,7 +197,7 @@ func swapConflictSeams(t *testing.T, cur sysproxy.DetectedProxy, alive bool) (ap
 	sysproxySupported = func() bool { return true }
 	var did bool
 	sysproxyApply = func(sysproxy.Settings) error { did = true; return nil }
-	sysproxyRestore = func() error { return nil }
+	sysproxyRestore = func() (bool, error) { return true, nil }
 	sysproxyCurrent = func() (sysproxy.DetectedProxy, error) { return cur, nil }
 	sysproxyAlive = func(string, int, time.Duration) bool { return alive }
 	return &did
@@ -294,7 +294,7 @@ func TestProbeNotCalledWithoutConflict(t *testing.T) {
 func TestRestoreSystemProxyFailureKeepsOwed(t *testing.T) {
 	events := recordEvents(t)
 	prev := sysproxyRestore
-	sysproxyRestore = func() error { return errors.New("boom") }
+	sysproxyRestore = func() (bool, error) { return false, errors.New("boom") }
 	t.Cleanup(func() { sysproxyRestore = prev })
 
 	a := &App{sysproxyOn: true}
@@ -305,6 +305,70 @@ func TestRestoreSystemProxyFailureKeepsOwed(t *testing.T) {
 	}
 	if !slices.Contains(*events, "sysproxy:error") {
 		t.Fatalf("want sysproxy:error toast, got %v", *events)
+	}
+}
+
+// TestRestoreFallsBackToDisableWhenBackupGone covers the missing-snapshot
+// branch: we applied but the backup is gone, so Restore has nothing to put back.
+// Reporting success there is what used to leave the OS pointed at a dying
+// listener with no recovery data; instead the proxy must be switched off.
+func TestRestoreFallsBackToDisableWhenBackupGone(t *testing.T) {
+	events := recordEvents(t)
+	prevRestore, prevDisable := sysproxyRestore, sysproxyDisable
+	disabled := 0
+	sysproxyRestore = func() (bool, error) { return false, nil }
+	sysproxyDisable = func() error { disabled++; return nil }
+	t.Cleanup(func() { sysproxyRestore, sysproxyDisable = prevRestore, prevDisable })
+
+	a := &App{sysproxyOn: true}
+	a.setRuntimeContext(context.Background())
+	a.restoreSystemProxy()
+
+	if disabled != 1 {
+		t.Fatalf("disable ran %d times, want 1", disabled)
+	}
+	if a.sysproxyOn {
+		t.Fatal("the proxy is off now, so nothing is owed")
+	}
+	if !slices.Contains(*events, "sysproxy:restored") {
+		t.Fatalf("want sysproxy:restored, got %v", *events)
+	}
+}
+
+// TestRestoreFallbackFailureKeepsOwed: if even the disable fails, the flag stays
+// set (so Shutdown retries) and the user is told to fix it by hand.
+func TestRestoreFallbackFailureKeepsOwed(t *testing.T) {
+	events := recordEvents(t)
+	prevRestore, prevDisable := sysproxyRestore, sysproxyDisable
+	sysproxyRestore = func() (bool, error) { return false, nil }
+	sysproxyDisable = func() error { return errors.New("no rights") }
+	t.Cleanup(func() { sysproxyRestore, sysproxyDisable = prevRestore, prevDisable })
+
+	a := &App{sysproxyOn: true}
+	a.setRuntimeContext(context.Background())
+	a.restoreSystemProxy()
+
+	if !a.sysproxyOn {
+		t.Fatal("a failed fallback must keep the flag set for a retry")
+	}
+	if !slices.Contains(*events, "sysproxy:error") {
+		t.Fatalf("want sysproxy:error, got %v", *events)
+	}
+}
+
+// TestRestoreSkipsDisableWhenNothingApplied: the fallback must never fire when
+// this session never applied — that would switch off a proxy we do not own.
+func TestRestoreSkipsDisableWhenNothingApplied(t *testing.T) {
+	prevRestore, prevDisable := sysproxyRestore, sysproxyDisable
+	calls := 0
+	sysproxyRestore = func() (bool, error) { calls++; return false, nil }
+	sysproxyDisable = func() error { calls++; return nil }
+	t.Cleanup(func() { sysproxyRestore, sysproxyDisable = prevRestore, prevDisable })
+
+	a := &App{} // sysproxyOn false: we never applied
+	a.restoreSystemProxy()
+	if calls != 0 {
+		t.Fatalf("restore/disable must not run when nothing was applied, got %d calls", calls)
 	}
 }
 

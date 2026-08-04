@@ -96,6 +96,22 @@ func restore(b Backup) error {
 	return nil
 }
 
+// disable clears ProxyEnable, leaving ProxyServer/ProxyOverride alone (there is
+// no captured state to put back here). See DisableApplied.
+func disable() error {
+	k, err := registry.OpenKey(registry.CURRENT_USER, inetSettingsPath, registry.SET_VALUE)
+	if err != nil {
+		return fmt.Errorf("시스템 프록시 설정을 열지 못했어요: %v", err)
+	}
+	defer k.Close()
+
+	if err := k.SetDWordValue("ProxyEnable", 0); err != nil {
+		return fmt.Errorf("시스템 프록시 해제에 실패했어요: %v", err)
+	}
+	notifyWinInetChanged()
+	return nil
+}
+
 // restoreString sets name back to val, or deletes it when it did not exist
 // before (so a value we created is removed rather than left empty). Delete of an
 // absent value is treated as success.

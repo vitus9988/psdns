@@ -23,6 +23,7 @@ var (
 	osCapture = capture
 	osApply   = apply
 	osRestore = restore
+	osDisable = disable
 )
 
 // Settings is the proxy configuration to apply. Host/Port come from the live
@@ -157,12 +158,23 @@ func Apply(s Settings) error {
 }
 
 // Restore puts the OS proxy back to the snapshot taken by Apply and removes the
-// backup. It is a no-op when there is no backup, so it is safe to call
-// unconditionally and more than once.
-func Restore() error {
-	_, err := restoreBackup()
-	return err
+// backup. It is safe to call unconditionally and more than once. restored is
+// false when there was no backup to put back, which the caller MUST NOT read as
+// "the OS is untouched": if it applied and the backup has since gone missing
+// (deleted as corrupt, cleaned up by another tool, taken by a duplicate
+// instance), the proxy is still pointed at it with no snapshot left — see
+// DisableApplied for the fallback that keeps the network working.
+func Restore() (restored bool, err error) {
+	return restoreBackup()
 }
+
+// DisableApplied turns the OS web proxy off. It is the fallback for the one case
+// Restore cannot handle: we know we applied, but the backup that says what to go
+// back to is gone. Turning the proxy off cannot reproduce the user's previous
+// setting, but it does the one thing that matters — traffic stops being routed
+// through a proxy that is about to disappear, so the network keeps working — and
+// it needs no backup, so it is safe to call more than once.
+func DisableApplied() error { return osDisable() }
 
 // RecoverStale restores a backup left by a previous run that exited without
 // restoring (a crash or force-kill). On a clean start there is no backup and it

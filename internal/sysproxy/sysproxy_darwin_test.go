@@ -97,8 +97,12 @@ func TestApplyRestoreRoundTrip(t *testing.T) {
 	}
 
 	// Restore puts the captured (disabled) state back and removes the backup.
-	if err := Restore(); err != nil {
+	restored, err := Restore()
+	if err != nil {
 		t.Fatalf("Restore: %v", err)
+	}
+	if !restored {
+		t.Error("Restore must report that it put a backup back")
 	}
 	if backupExists() {
 		t.Error("Restore must delete the backup")
@@ -114,9 +118,43 @@ func TestApplyRestoreRoundTrip(t *testing.T) {
 		t.Errorf("Restore never turned the web proxy back off; calls: %v", fake.calls)
 	}
 
-	// Restore with no backup is a safe no-op.
-	if err := Restore(); err != nil {
+	// Restore with no backup changes nothing and says so, which is what lets the
+	// GUI tell "nothing was owed" from "the snapshot went missing".
+	restored, err = Restore()
+	if err != nil {
 		t.Errorf("Restore(again): %v", err)
+	}
+	if restored {
+		t.Error("Restore without a backup must report restored=false")
+	}
+}
+
+// TestDisableApplied covers the no-backup fallback: it must switch the proxy off
+// on every service without needing (or touching) a backup.
+func TestDisableApplied(t *testing.T) {
+	redirectConfigDir(t)
+	fake := &fakeNetworksetup{}
+	fake.install(t)
+
+	if err := DisableApplied(); err != nil {
+		t.Fatalf("DisableApplied: %v", err)
+	}
+	for _, want := range [][]string{
+		{"-setwebproxystate", "Wi-Fi", "off"},
+		{"-setsecurewebproxystate", "Wi-Fi", "off"},
+	} {
+		found := false
+		for _, c := range fake.calls {
+			if reflect.DeepEqual(c, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("DisableApplied never ran %v; calls: %v", want, fake.calls)
+		}
+	}
+	if backupExists() {
+		t.Error("DisableApplied must not write a backup")
 	}
 }
 
