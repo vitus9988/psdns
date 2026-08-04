@@ -131,6 +131,9 @@
         <div id="dnsHint" class="addr addr--note" hidden>
           <span id="dnsHintText">컴퓨터의 DNS 서버를 127.0.0.1로 바꿔 주세요</span>
         </div>
+        <div id="dnsRevertHint" class="addr addr--note" hidden>
+          <span>psdns를 끄거나 종료할 때는 DNS 설정을 원래대로(자동) 되돌려 주세요 — psdns가 꺼진 상태로 두면 인터넷이 안 돼요.</span>
+        </div>
         <details class="howto">
           <summary>설정하는 법 보기</summary>
           <p>크롬: 설정 → 시스템 → <b>컴퓨터 프록시 설정 열기</b> → 수동 프록시에 위 주소를 넣어요. 시스템 DNS는 바꾸지 않아도 돼요.</p>
@@ -199,6 +202,7 @@
     <div class="modal__sheet" role="dialog" aria-modal="true" aria-labelledby="quitModalTitle">
       <h2 id="quitModalTitle" class="modal__title">psdns를 종료할까요?</h2>
       <p class="modal__body">종료하면 보호가 꺼지고, 차단 우회도 멈춰요</p>
+      <p id="quitDnsWarn" class="modal__body modal__body--warn" hidden></p>
       <div class="modal__actions">
         <button id="quitConfirm" class="btn btn--danger" type="button">종료하기</button>
         <button class="btn btn--soft" data-close="quit" type="button">계속 쓰기</button>

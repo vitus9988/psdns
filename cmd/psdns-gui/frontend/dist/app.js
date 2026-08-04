@@ -221,10 +221,14 @@
     $("dnsHintText").textContent = "컴퓨터의 DNS 서버를 " + hostOf(ui.dnsListen) + " 로 바꿔 주세요";
 
     const proxyish = mode === "proxy" || mode === "run";
+    const dnsish = mode === "resolve" || mode === "run";
     proxyRow.hidden = !proxyish;
     socksRow.hidden = !proxyish;
     howto.hidden = !proxyish;
-    dnsHint.hidden = !(mode === "resolve" || mode === "run");
+    dnsHint.hidden = !dnsish;
+    // The DNS change is the user's to make and the user's to undo — psdns cannot
+    // revert it — so say so next to the instruction, not only after they stop.
+    $("dnsRevertHint").hidden = !dnsish;
 
     card.classList.toggle("is-dim", !running);
   }
@@ -281,6 +285,7 @@
   async function togglePower() {
     const btn = $("powerBtn");
     btn.disabled = true;
+    const stoppingMode = mode;
     try {
       if (!running) {
         if (!(await persist())) { return; }
@@ -289,6 +294,7 @@
         lastState = await app.Start(mode);
       } else {
         lastState = await app.Stop();
+        remindDnsRevert(stoppingMode);
       }
       running = !!(lastState && lastState.running);
       if (lastState && lastState.mode) mode = lastState.mode;
@@ -299,6 +305,21 @@
     } finally {
       btn.disabled = false;
     }
+  }
+
+  // remindDnsRevert nags about the one setting psdns cannot put back for the user.
+  // The DNS modes only work if the user points the OS resolver at us BY HAND (the
+  // connection card asks them to), and nothing in psdns can undo that — so once we
+  // stop, that resolver address is dead and their internet is down until they
+  // revert it. The system proxy is different: psdns set that itself and restores
+  // it automatically. Persistent, not a toast, because acting on it means leaving
+  // the app to open OS network settings.
+  function remindDnsRevert(stoppedMode) {
+    if (stoppedMode !== "resolve" && stoppedMode !== "run") return;
+    showSysProxyNotice(
+      "시스템 DNS 를 " + hostOf(ui && ui.dnsListen) + " 로 직접 바꿨다면 이제 원래대로" +
+      "(자동 또는 통신사/공용 DNS) 되돌려 주세요. psdns 가 꺼진 상태로 두면 인터넷이 안 될 수 있어요."
+    );
   }
 
   // notifyFallback explains why a proxy bound to an alternate port: the configured
@@ -434,7 +455,17 @@
       });
     });
 
-    $("quitBtn").addEventListener("click", () => openModal("quitModal"));
+    $("quitBtn").addEventListener("click", () => {
+      // A banner would die with the window, so the DNS reminder has to be in the
+      // confirmation itself.
+      const warn = $("quitDnsWarn");
+      const dnsish = running && (mode === "resolve" || mode === "run");
+      warn.textContent = dnsish
+        ? "시스템 DNS 를 " + hostOf(ui && ui.dnsListen) + " 로 바꿔 두었다면, 종료 후 원래대로(자동) 되돌려 주세요. 그대로 두면 인터넷이 안 돼요."
+        : "";
+      warn.hidden = !dnsish;
+      openModal("quitModal");
+    });
     $("quitConfirm").addEventListener("click", () => app.Quit());
     document.querySelectorAll('[data-close="quit"]').forEach((el) => {
       el.addEventListener("click", () => closeModal("quitModal"));
