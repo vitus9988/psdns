@@ -16,6 +16,12 @@ import (
 	"github.com/vitus9988/psdns/internal/doh"
 )
 
+// drainTimeout bounds how long Shutdown waits for in-flight query handlers to
+// finish after the sockets are closed. Generous for a handler that only has to
+// notice its write failed, short enough that a quit never looks hung. A var so
+// tests can shrink it rather than spend it.
+var drainTimeout = 2 * time.Second
+
 // Server listens on UDP and TCP and relays queries to a DoH upstream.
 type Server struct {
 	doh     doh.Exchanger
@@ -97,6 +103,17 @@ func udpSize(req *dns.Msg) int {
 // and the bind error is returned directly. Once both are serving, the first one
 // to exit triggers Shutdown of the other.
 func (s *Server) ListenAndServe() error {
+	// Already stopped: don't take the port at all. The post-bind check below is
+	// what makes this safe rather than merely likely (a Shutdown can still land
+	// between here and the bind), but skipping the bind outright keeps a stopped
+	// server from briefly reclaiming a port a new run may be taking.
+	s.mu.Lock()
+	stopped := s.closed
+	s.mu.Unlock()
+	if stopped {
+		return net.ErrClosed
+	}
+
 	pc, err := net.ListenPacket("udp", s.addr)
 	if err != nil {
 		return err
@@ -156,16 +173,20 @@ func (s *Server) Shutdown() error {
 	if pc != nil {
 		record(pc.Close())
 	}
-	// Let miekg unwind its own state and wait out in-flight handlers. "server
-	// not started" only means we won the race above and there was nothing
-	// serving yet.
-	if s.udp != nil {
-		if err := s.udp.Shutdown(); err != nil && !isNotStarted(err) {
-			record(err)
+	// Let miekg unwind its own state and wait out in-flight handlers, but only
+	// briefly: its Shutdown blocks until every handler goroutine has returned,
+	// and a handler waiting on a slow DoH exchange holds that for the whole query
+	// timeout (10s by default). The ports are already released above, so this
+	// wait is politeness — letting answers in flight finish — and must not stall
+	// a quit, which on macOS runs this teardown on the main thread. "server not
+	// started" only means we won the race above and nothing was serving yet.
+	ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+	defer cancel()
+	for _, srv := range []*dns.Server{s.udp, s.tcp} {
+		if srv == nil {
+			continue
 		}
-	}
-	if s.tcp != nil {
-		if err := s.tcp.Shutdown(); err != nil && !isNotStarted(err) {
+		if err := srv.ShutdownContext(ctx); err != nil && !isNotStarted(err) && !errors.Is(err, context.DeadlineExceeded) {
 			record(err)
 		}
 	}

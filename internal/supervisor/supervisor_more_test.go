@@ -71,6 +71,46 @@ func TestStartStopRun(t *testing.T) {
 	}
 }
 
+// TestRapidResolveCyclesReleaseFixedDNSPort is the reported "port already in use
+// on relaunch" symptom at the level the GUI drives: a Stop that lands before the
+// DNS serve loop has started used to leave :53 bound inside the still-running
+// (tray-hidden) process, and because the DNS port has no fallback the next Start
+// failed outright. Every cycle here reuses one fixed port with no settle delay,
+// so a leak shows up as a bind error on a later iteration.
+func TestRapidResolveCyclesReleaseFixedDNSPort(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	addr := pc.LocalAddr().String()
+	_ = pc.Close() // hand the port over to the server under test
+
+	c := freeProxyConfig()
+	c.DNSListen = addr
+	sup := New(c)
+	for i := 0; i < 20; i++ {
+		if err := sup.Start(ModeResolve); err != nil {
+			t.Fatalf("iter %d: Start: %v", i, err)
+		}
+		if err := sup.Stop(); err != nil { // immediately: races the serve goroutine
+			t.Fatalf("iter %d: Stop: %v", i, err)
+		}
+	}
+	// A leak would surface here: the same address must still be bindable.
+	if err := sup.Start(ModeResolve); err != nil {
+		t.Fatalf("final Start: %v", err)
+	}
+	st := sup.WaitSettled(150 * time.Millisecond)
+	t.Cleanup(func() { _ = sup.Stop() })
+	l, ok := findListener(st, KindDNS)
+	if !ok {
+		t.Fatal("dns listener missing")
+	}
+	if !l.Up || l.Err != "" {
+		t.Fatalf("dns port was not released by the cycling: up=%v err=%q", l.Up, l.Err)
+	}
+}
+
 // TestResolveDNSBindFailureSurfacesErr occupies the UDP port the DNS server
 // wants, so its (fixed-port, no-fallback) bind fails asynchronously and must be
 // reported through the listener's Err instead of Start's return value.
