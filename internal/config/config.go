@@ -54,6 +54,11 @@ type Config struct {
 	// running HTTP proxy on start and restore it on stop/quit. GUI-only: the CLI
 	// and supervisor never read this field, so their behavior is unchanged.
 	SetSystemProxy bool
+
+	// ProxyBypass lists user-chosen hosts the OS proxy must skip (each also
+	// covers its subdomains), so a site that breaks only through psdns loads as
+	// if psdns were off. GUI-only, like SetSystemProxy.
+	ProxyBypass []string
 }
 
 // Default returns the baseline configuration. The default DoH endpoint uses an

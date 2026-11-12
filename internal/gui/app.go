@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -112,9 +114,11 @@ type App struct {
 
 // NewApp builds the App. version is the GUI build version shown in the UI.
 func NewApp(version string) *App {
+	cfg := config.Default()
+	cfg.ProxyBypass = loadBypass()
 	return &App{
 		version: version,
-		sup:     supervisor.New(config.Default()),
+		sup:     supervisor.New(cfg),
 		// No fixed Client.Timeout: it would cap the whole request including the
 		// archive body read, which can legitimately exceed it on a slow link.
 		// Each call sets its own context deadline instead (updateCheckTimeout for
@@ -326,7 +330,7 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 	if httpAddr == "" {
 		return // resolve mode, or the HTTP listener failed to bind
 	}
-	s, err := sysproxy.FromAddr(httpAddr, sysproxy.DefaultBypass())
+	s, err := sysproxy.FromAddr(httpAddr, sysproxy.BypassWith(a.sup.Config().ProxyBypass))
 	if err != nil {
 		return
 	}
@@ -462,13 +466,69 @@ func (a *App) SetConfig(u uiconfig.Config) (uiconfig.SetResult, error) {
 	if err != nil {
 		return uiconfig.SetResult{}, err
 	}
+	prevBypass := a.sup.Config().ProxyBypass
 	if err := a.sup.SetConfig(c); err != nil {
 		if errors.Is(err, supervisor.ErrAlreadyRunning) {
 			return uiconfig.SetResult{}, errors.New("실행 중에는 설정을 바꿀 수 없어요. 먼저 중지한 뒤 바꿔 주세요.")
 		}
 		return uiconfig.SetResult{}, err
 	}
+	// Write only on a change, so a plain settings save never touches the file.
+	if !slices.Equal(prevBypass, c.ProxyBypass) {
+		if err := saveBypass(c.ProxyBypass); err != nil {
+			warns = append(warns, "프록시 예외 사이트를 저장하지 못했어요. 다음 실행 때는 다시 입력해야 해요.")
+		}
+	}
 	return uiconfig.SetResult{Config: uiconfig.FromConfig(a.sup.Config()), Warnings: warns}, nil
+}
+
+// bypassFile is <UserConfigDir>/psdns/proxy-bypass.txt, one host per line. The
+// exception list is the only setting persisted across launches: re-entering it
+// every launch would defeat it, while persisting every setting would freeze
+// today's defaults (e.g. the DoH endpoint) into the user's file for good.
+func bypassFile() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "psdns", "proxy-bypass.txt"), nil
+}
+
+// loadBypass returns the saved exception list. A missing, unreadable or invalid
+// file (it is re-validated: the hosts go verbatim into OS settings) yields none.
+func loadBypass() []string {
+	p, err := bypassFile()
+	if err != nil {
+		return nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	hosts, err := uiconfig.ParseBypass(string(b))
+	if err != nil {
+		log.Printf("gui: ignoring invalid %s: %v", p, err)
+		return nil
+	}
+	return hosts
+}
+
+// saveBypass persists hosts for the next launch; an empty list removes the file.
+func saveBypass(hosts []string) error {
+	p, err := bypassFile()
+	if err != nil {
+		return err
+	}
+	if len(hosts) == 0 {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(p, []byte(strings.Join(hosts, "\n")+"\n"), 0o600)
 }
 
 // CheckUpdate forces a fresh update check (the manual "업데이트 확인" button).

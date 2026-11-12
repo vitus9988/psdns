@@ -64,11 +64,24 @@ func proxyHostForDial(host string) string {
 	return host
 }
 
-// DefaultBypass lists the hosts that must bypass the proxy: loopback and private
-// ranges, so local and LAN traffic (and the proxy reaching itself) is never
-// routed through psdns.
+// DefaultBypass lists the hosts that must bypass the proxy: loopback, private
+// and link-local ranges and mDNS (.local), so local and LAN traffic (and the
+// proxy reaching itself) is never routed through psdns. The last two are the
+// macOS defaults, which Apply would otherwise drop while psdns runs.
 func DefaultBypass() []string {
-	return []string{"localhost", "127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	return []string{"localhost", "127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+		"169.254.0.0/16", "*.local"}
+}
+
+// BypassWith returns DefaultBypass plus each user host and its subdomains
+// ("h" and "*.h" — the wildcard form all three OSes accept). hosts must already
+// be validated (uiconfig does): they are written into OS settings verbatim.
+func BypassWith(hosts []string) []string {
+	out := DefaultBypass()
+	for _, h := range hosts {
+		out = append(out, h, "*."+h)
+	}
+	return out
 }
 
 // Supported reports whether system-proxy automation is available on this OS and

@@ -145,6 +145,11 @@
         <details id="advanced" class="advanced">
           <summary class="advanced__summary">고급 설정</summary>
           <div class="field">
+            <label for="fProxyBypass">프록시 예외 사이트</label>
+            <input id="fProxyBypass" type="text" placeholder="예: mybank.co.kr, intranet.example.com" />
+            <p class="hint">psdns를 켰을 때만 안 열리는 사이트를 적어 주세요. 여기 적은 사이트(하위 도메인 포함)는 psdns를 거치지 않고 평소처럼 접속돼요 — 차단 우회도 적용되지 않아요. 시스템 프록시 자동 설정이 켜져 있을 때 적용돼요.</p>
+          </div>
+          <div class="field">
             <label for="fDoh">DoH 주소</label>
             <input id="fDoh" type="text" inputmode="url" placeholder="https://1.1.1.1/dns-query" />
           </div>

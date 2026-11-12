@@ -43,6 +43,14 @@ func TestFromAddr(t *testing.T) {
 	}
 }
 
+func TestBypassWith(t *testing.T) {
+	got := BypassWith([]string{"bank.co.kr"})
+	want := append(DefaultBypass(), "bank.co.kr", "*.bank.co.kr")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("BypassWith = %v, want %v", got, want)
+	}
+}
+
 func TestFormatProxyServer(t *testing.T) {
 	got := formatProxyServer("127.0.0.1", 8080)
 	want := "http=127.0.0.1:8080;https=127.0.0.1:8080"

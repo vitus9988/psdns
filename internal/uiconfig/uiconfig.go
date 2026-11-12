@@ -6,7 +6,9 @@ package uiconfig
 import (
 	"fmt"
 	"net"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/vitus9988/psdns/internal/config"
 	"github.com/vitus9988/psdns/internal/doh"
@@ -29,6 +31,8 @@ type Config struct {
 
 	// SetSystemProxy mirrors config.SetSystemProxy (GUI-only auto system proxy).
 	SetSystemProxy bool `json:"setSystemProxy"`
+	// ProxyBypass is config.ProxyBypass as one comma-separated string.
+	ProxyBypass string `json:"proxyBypass"`
 }
 
 // SetResult is the response of a config update: the applied config plus any
@@ -53,6 +57,7 @@ func FromConfig(c config.Config) Config {
 		Timeout:       c.Timeout.String(),
 
 		SetSystemProxy: c.SetSystemProxy,
+		ProxyBypass:    strings.Join(c.ProxyBypass, ", "),
 	}
 }
 
@@ -80,6 +85,11 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 
 	// SetSystemProxy is a plain bool with no validation; carry it through.
 	c.SetSystemProxy = u.SetSystemProxy
+	bypass, err := ParseBypass(u.ProxyBypass)
+	if err != nil {
+		return c, warns, err
+	}
+	c.ProxyBypass = bypass
 
 	switch config.FragStrategy(u.Frag) {
 	case config.FragNone, config.FragSplit, config.FragTLSRecord:
@@ -141,4 +151,33 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 	}
 
 	return c, warns, nil
+}
+
+// ParseBypass turns the user's proxy-exception text into normalized host names.
+// Entries are separated by commas, semicolons or whitespace; a pasted URL is cut
+// down to its host ("https://www.Bank.co.kr:443/login" -> "www.bank.co.kr") and
+// a leading "*." or "." is dropped (subdomains are always covered). This is a
+// trust boundary: the hosts are written verbatim into OS proxy settings — the
+// Windows ProxyOverride ";" list and a GNOME GVariant '...' literal — so anything
+// beyond letters, digits, '-' and '.' is rejected.
+func ParseBypass(s string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ';' || unicode.IsSpace(r) }) {
+		h := strings.ToLower(f)
+		if i := strings.Index(h, "://"); i >= 0 {
+			h = h[i+3:]
+		}
+		h, _, _ = strings.Cut(h, "/")
+		h, _, _ = strings.Cut(h, ":")
+		h = strings.Trim(strings.TrimPrefix(h, "*"), ".")
+		if h == "" || strings.Trim(h, "abcdefghijklmnopqrstuvwxyz0123456789.-") != "" {
+			return nil, fmt.Errorf("프록시 예외 사이트 형식이 올바르지 않아요: %q (예: example.com)", f)
+		}
+		if !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	return out, nil
 }

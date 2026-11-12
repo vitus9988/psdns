@@ -19,7 +19,7 @@
       dohFallbacks: "", dohHedgeDelay: "250ms",
       dnsListen: "127.0.0.1:53", proxyListen: "127.0.0.1:8080",
       socksListen: "127.0.0.1:1080", frag: "split", fragDelay: "0s", timeout: "10s",
-      setSystemProxy: true,
+      setSystemProxy: true, proxyBypass: "",
     }),
     GetStatus: async () => ({ running: false, mode: "proxy", listeners: [] }),
     Start: async (m) => ({
@@ -235,6 +235,7 @@
 
   function renderAdvanced() {
     if (!ui) return;
+    $("fProxyBypass").value = ui.proxyBypass || "";
     $("fDoh").value = ui.dohUrl || "";
     $("fBootstrap").value = ui.dohBootstrap || "";
     $("fDohFallbacks").value = ui.dohFallbacks || "";
@@ -257,6 +258,7 @@
 
   // ---- config persistence ----------------------------------------------------
   function readAdvancedInto(c) {
+    c.proxyBypass = $("fProxyBypass").value.trim();
     c.dohUrl = $("fDoh").value.trim();
     c.dohBootstrap = $("fBootstrap").value.trim();
     c.dohFallbacks = $("fDohFallbacks").value.trim();

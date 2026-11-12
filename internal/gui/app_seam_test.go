@@ -497,3 +497,43 @@ func newHTTPUpState() supervisor.State {
 		},
 	}
 }
+
+// TestProxyBypassAppliedAndPersisted covers the per-site exception list: the
+// hosts reach the OS bypass list (with their subdomains) on Start, and survive
+// a relaunch via the saved file.
+func TestProxyBypassAppliedAndPersisted(t *testing.T) {
+	redirectConfigDir(t)
+	recordEvents(t)
+	applied := swapConflictSeams(t, sysproxy.DetectedProxy{}, false)
+	var got sysproxy.Settings
+	sysproxyApply = func(s sysproxy.Settings) (bool, error) { *applied = true; got = s; return true, nil }
+
+	a := NewApp("t")
+	a.setRuntimeContext(context.Background())
+	u := a.GetConfig()
+	u.ProxyListen, u.SocksListen = "127.0.0.1:0", "127.0.0.1:0"
+	u.ProxyBypass = "https://www.Bank.co.kr/login"
+	if _, err := a.SetConfig(u); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if _, err := a.Start("proxy"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _, _ = a.Stop() })
+	if !*applied || !slices.Contains(got.Bypass, "www.bank.co.kr") || !slices.Contains(got.Bypass, "*.www.bank.co.kr") {
+		t.Fatalf("exception not in the applied bypass list: %v", got.Bypass)
+	}
+
+	if b := NewApp("t").GetConfig().ProxyBypass; b != "www.bank.co.kr" {
+		t.Fatalf("relaunch loaded %q, want the saved exception", b)
+	}
+	// Clearing the list removes the saved file.
+	_, _ = a.Stop()
+	u.ProxyBypass = ""
+	if _, err := a.SetConfig(u); err != nil {
+		t.Fatalf("SetConfig(clear): %v", err)
+	}
+	if b := NewApp("t").GetConfig().ProxyBypass; b != "" {
+		t.Fatalf("relaunch after clearing loaded %q, want none", b)
+	}
+}
