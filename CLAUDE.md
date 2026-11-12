@@ -1,6 +1,22 @@
-# psdns
+# CLAUDE.md
 
-개인용 크로스플랫폼 차단 우회 도구. 사용법·플래그·빌드·구조는 모두 @README.md 에 있다 (중복 금지).
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+psdns — 개인용 크로스플랫폼 차단 우회 도구. 사용법·플래그·빌드·구조는 모두 @README.md 에 있고, 모듈 의존·요청 흐름(시퀀스)은 `docs/architecture.md` 에 있다 (중복 금지).
+
+## 검사·테스트 명령 (README 에 없는 것만)
+
+GUI cgo 패키지(`cmd/psdns-gui`·`internal/gui`)는 네이티브 툴체인이 필요해 `ci.yml` 메인 잡에서 제외되고 macOS/Windows 잡에서 따로 돈다. 로컬도 같은 분리를 쓴다(zsh 는 변수를 단어 분할하지 않으므로 `$(...)` 를 인라인으로):
+
+```sh
+gofmt -l .                                                              # 출력이 있으면 CI 실패
+go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+GOOS=windows go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')   # 타 OS 전용 심볼(테스트 포함) 타입체크, darwin 도 동일
+golangci-lint run $(go list -f '{{.Dir}}' ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')   # CI 는 v2.12
+go test -race $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')   # 커버리지 하한 84% — ci.yml·release.yml 두 곳 동기
+go test -race -run TestName ./internal/proxy                            # 단일 테스트
+go test -race ./internal/gui/... ./cmd/psdns-gui/...                    # GUI 패키지 (macOS/Windows)
+```
 
 ## 코드/grep 로 알 수 없는 설계 결정 (Why)
 
