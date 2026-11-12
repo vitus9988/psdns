@@ -102,6 +102,7 @@ func (s *Supervisor) Start(mode Mode) error {
 	wg := &sync.WaitGroup{}
 	s.serveWG = wg
 	res := resolver.New(client)
+	res.Fallback = resolver.SystemLookup
 
 	// start records a fresh listener and runs its blocking serve loop in a
 	// goroutine, capturing the bind/serve error when it returns. Used for the DNS

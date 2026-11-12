@@ -31,6 +31,13 @@ type entry struct {
 
 // Resolver resolves names via a DoH client.
 type Resolver struct {
+	// Fallback, when set, resolves a name DoH could not (error or no addresses):
+	// .local / intranet / hosts-file names, or a domain the DoH upstream fails
+	// (e.g. SERVFAIL on broken DNSSEC). It never runs when DoH answered, so a
+	// tampered system DNS cannot override a DoH result. Its results are not
+	// cached. Set it before first use; nil disables it.
+	Fallback func(ctx context.Context, host string) ([]net.IP, error)
+
 	doh   doh.Exchanger
 	mu    sync.Mutex
 	cache map[string]entry
@@ -110,10 +117,18 @@ func (r *Resolver) runLookup(key string, call *inflightCall) {
 	if err == nil && len(ips) == 0 {
 		err = fmt.Errorf("no addresses for %s", key)
 	}
+	cache := err == nil
+	if err != nil && r.Fallback != nil {
+		// Not cached: if DoH only hiccupped, a system-DNS answer (possibly a
+		// forged block page) must not outlive the hiccup.
+		if fips, ferr := r.Fallback(ctx, key); ferr == nil && len(fips) > 0 {
+			ips, err = fips, nil
+		}
+	}
 
 	now := time.Now()
 	r.mu.Lock()
-	if err == nil {
+	if cache {
 		r.storeLocked(key, entry{ips: ips, expires: now.Add(ttl)}, now)
 	}
 	delete(r.inflight, key)
@@ -121,6 +136,24 @@ func (r *Resolver) runLookup(key string, call *inflightCall) {
 
 	call.ips, call.err = ips, err
 	close(call.done)
+}
+
+// SystemLookup resolves host with the OS resolver (mDNS, hosts file, intranet
+// DNS), IPv4 first to match lookup's dial order. It is the production Fallback.
+func SystemLookup(ctx context.Context, host string) ([]net.IP, error) {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var v4, v6 []net.IP
+	for _, a := range addrs {
+		if a.IP.To4() != nil {
+			v4 = append(v4, a.IP)
+		} else {
+			v6 = append(v6, a.IP)
+		}
+	}
+	return append(v4, v6...), nil
 }
 
 // cloneIPs returns a shallow copy of ips so a caller may sort or append to its
@@ -249,9 +282,15 @@ func (r *Resolver) lookup(ctx context.Context, host string) ([]net.IP, time.Dura
 		return nil, 0, ctx.Err()
 	}
 
-	// If it produced addresses, wait only a short grace period for the other
-	// family; otherwise wait for it unconditionally (we have nothing yet).
-	if len(v4)+len(v6) > 0 {
+	// Only an A-first answer gets the short grace period for AAAA. If AAAA came
+	// first (or nothing usable yet), wait for the other family unconditionally:
+	// dialUpstream does no Happy Eyeballs racing, so dropping a late A would leave
+	// an IPv6-only result — cached for the TTL — that fails with "no route to
+	// host" on the many networks without IPv6, breaking a site that loads fine
+	// without psdns.
+	// ponytail: an answered AAAA with a hung A waits out the caller's timeout;
+	// race the families at dial time if that ever shows up.
+	if len(v4) > 0 {
 		timer := time.NewTimer(resolutionDelay)
 		defer timer.Stop()
 		select {

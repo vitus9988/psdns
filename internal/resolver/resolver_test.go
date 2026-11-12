@@ -25,6 +25,7 @@ type answer struct {
 	fail      bool    // respond 500 (forces a request error)
 	delay     time.Duration
 	aaaaDelay time.Duration // extra delay applied only to AAAA queries
+	aDelay    time.Duration // extra delay applied only to A queries
 }
 
 type dnsRR struct {
@@ -57,6 +58,9 @@ func mockDoH(t testing.TB, ans answer) (*doh.Client, *int32) {
 		}
 		if ans.aaaaDelay > 0 && q.Question[0].Qtype == dns.TypeAAAA {
 			time.Sleep(ans.aaaaDelay)
+		}
+		if ans.aDelay > 0 && q.Question[0].Qtype == dns.TypeA {
+			time.Sleep(ans.aDelay)
 		}
 		if ans.fail {
 			http.Error(w, "boom", http.StatusInternalServerError)
@@ -259,6 +263,78 @@ func TestResolveSlowAAAADoesNotStall(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Fatalf("Resolve stalled on slow AAAA: took %v, want well under the 2s AAAA delay", elapsed)
+	}
+}
+
+// TestResolveSlowAKeepsIPv4 covers the reverse race: AAAA answers first and A
+// lags past the 50ms grace. The A records must still be merged (IPv4 first) —
+// an IPv6-only result fails to dial on networks without IPv6 and stays cached.
+func TestResolveSlowAKeepsIPv4(t *testing.T) {
+	c, _ := mockDoH(t, answer{
+		a:      []dnsRR{{ip: "1.2.3.4", ttl: 60}},
+		aaaa:   []dnsRR{{ip: "2001:db8::1", ttl: 60}},
+		aDelay: 200 * time.Millisecond,
+	})
+	r := resolver.New(c)
+
+	ips, err := r.Resolve(context.Background(), "slow-a.example.com")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(ips) != 2 || ips[0].String() != "1.2.3.4" {
+		t.Fatalf("want [1.2.3.4 2001:db8::1] (IPv4 first), got %v", ips)
+	}
+}
+
+// TestResolveFallback covers the system-resolver fallback: it answers only when
+// DoH produced no address, never overrides a DoH answer, and is not cached.
+func TestResolveFallback(t *testing.T) {
+	var calls int32
+	fallback := func(context.Context, string) ([]net.IP, error) {
+		atomic.AddInt32(&calls, 1)
+		return []net.IP{net.ParseIP("10.0.0.7")}, nil
+	}
+
+	for name, ans := range map[string]answer{"nodata": {}, "doh error": {fail: true}} {
+		t.Run(name, func(t *testing.T) {
+			atomic.StoreInt32(&calls, 0)
+			c, reqCount := mockDoH(t, ans)
+			r := resolver.New(c)
+			r.Fallback = fallback
+			for i := 0; i < 2; i++ {
+				ips, err := r.Resolve(context.Background(), "nas.local")
+				if err != nil || len(ips) != 1 || ips[0].String() != "10.0.0.7" {
+					t.Fatalf("Resolve#%d = %v, %v; want the fallback address", i, ips, err)
+				}
+			}
+			// Both calls went to DoH first: the fallback answer was not cached.
+			if atomic.LoadInt32(&calls) != 2 || atomic.LoadInt32(reqCount) < 4 {
+				t.Fatalf("fallback calls=%d doh requests=%d; want 2 and >=4", calls, *reqCount)
+			}
+		})
+	}
+
+	t.Run("doh answered", func(t *testing.T) {
+		atomic.StoreInt32(&calls, 0)
+		c, _ := mockDoH(t, answer{a: []dnsRR{{ip: "1.2.3.4", ttl: 60}}})
+		r := resolver.New(c)
+		r.Fallback = fallback
+		ips, err := r.Resolve(context.Background(), "example.com")
+		if err != nil || len(ips) != 1 || ips[0].String() != "1.2.3.4" {
+			t.Fatalf("Resolve = %v, %v; want the DoH address", ips, err)
+		}
+		if n := atomic.LoadInt32(&calls); n != 0 {
+			t.Fatalf("fallback must not run when DoH answered, ran %d times", n)
+		}
+	})
+}
+
+// TestSystemLookup checks the production fallback against the OS resolver;
+// localhost resolves everywhere without touching the network.
+func TestSystemLookup(t *testing.T) {
+	ips, err := resolver.SystemLookup(context.Background(), "localhost")
+	if err != nil || len(ips) == 0 || !ips[0].IsLoopback() {
+		t.Fatalf("SystemLookup(localhost) = %v, %v; want loopback", ips, err)
 	}
 }
 

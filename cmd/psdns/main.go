@@ -215,6 +215,7 @@ func runProxy(args []string) {
 	maybeStartPprof()
 
 	res := resolver.New(mustDoH(c))
+	res.Fallback = resolver.SystemLookup
 	hp := proxy.NewHTTP(res, *c)
 	sp := proxy.NewSOCKS(res, *c)
 
@@ -241,6 +242,7 @@ func runAll(args []string) {
 
 	client := mustDoH(c)
 	res := resolver.New(client)
+	res.Fallback = resolver.SystemLookup
 	dsrv := dnssrv.New(client, c.DNSListen, c.Timeout)
 	hp := proxy.NewHTTP(res, *c)
 	sp := proxy.NewSOCKS(res, *c)
