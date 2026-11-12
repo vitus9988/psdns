@@ -35,7 +35,9 @@ type Resolver struct {
 	// .local / intranet / hosts-file names, or a domain the DoH upstream fails
 	// (e.g. SERVFAIL on broken DNSSEC). It never runs when DoH answered, so a
 	// tampered system DNS cannot override a DoH result. Its results are not
-	// cached. Set it before first use; nil disables it.
+	// cached. Set it before first use; nil disables it. Wire it only where the
+	// proxies resolve names, never into the DNS server path (dnssrv): in resolve
+	// mode the OS resolver is psdns itself.
 	Fallback func(ctx context.Context, host string) ([]net.IP, error)
 
 	doh   doh.Exchanger
