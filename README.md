@@ -5,6 +5,8 @@
 - **DNS 차단 우회** — 통신사 DNS 대신 DNS-over-HTTPS(DoH)로 주소를 찾아, 차단 페이지(warning.or.kr 등)로 보내지는 것을 막습니다.
 - **HTTPS(SNI) 차단 우회** — 접속할 사이트 이름이 담긴 첫 패킷을 잘게 나눠 보내 통신사가 읽지 못하게 합니다.
 
+![psdns 작동 방식](docs/how-it-works.webp)
+
 관리자 권한 없이 동작합니다(시스템 DNS 모드 제외). 터미널용 CLI(`psdns`)와 버튼 하나로 켜고 끄는 데스크톱 앱(`psdns-gui`)이 한 압축 파일에 들어 있습니다.
 
 | | |
