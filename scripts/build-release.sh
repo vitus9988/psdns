@@ -39,7 +39,7 @@ GUI_LDFLAGS="-s -w -X main.version=${VERSION} -X ${PKG}/internal/selfupdate.Vers
 # MACOS_SIGN_IDENTITY: when unset, builds are produced unsigned exactly as before
 # (so local builds and CI without secrets keep working). When set, the .app and
 # bundled CLI are codesigned; notarization+stapling additionally needs the
-# MACOS_NOTARY_* credentials. See README §릴리즈 발행 / release.yml for the env.
+# MACOS_NOTARY_* credentials. See docs/release.md / release.yml for the env.
 MACOS_BUNDLE_ID="${MACOS_BUNDLE_ID:-io.github.vitus9988.psdns}"
 
 # Defined before the GUI build block below, which calls them (bash resolves

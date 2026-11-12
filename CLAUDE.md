@@ -6,8 +6,9 @@ psdns — 개인용 크로스플랫폼 DNS·SNI 차단 우회 도구(CLI + Wails
 
 ## 찾아갈 곳
 
-- 사용법·플래그·빌드·구조·릴리즈 절차: `README.md`
-- 모듈 의존·요청 흐름: `docs/architecture.md`
+- 사용법·플래그·빌드: `README.md` (사용자용 — 내부 구현 설명은 넣지 않는다)
+- 디렉터리·모듈 의존·요청 흐름: `docs/architecture.md`
+- 릴리즈 절차·브랜치 보호·macOS 서명: `docs/release.md`
 - 검사·테스트: `.github/workflows/ci.yml` 의 단계를 로컬에서 그대로 실행(GUI cgo 패키지 `cmd/psdns-gui`·`internal/gui` 는 분리)
 - 릴리즈: `/release-test`(rc 프리릴리즈) · `/release-main`(정식) 스킬
 - 설계 결정의 이유: 해당 코드 주석

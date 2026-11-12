@@ -1,6 +1,28 @@
 # 내부 구조
 
-psdns 의 모듈 의존 관계와 요청 한 건이 처리되는 흐름을 시각화한다. 디렉터리별 한 줄 설명은 [README §구조](../README.md#구조)에 있고, 설계 *이유*(Why)는 해당 코드 주석에 있다 — 여기서는 **어떻게 연결되고 흐르는가**만 다룬다.
+psdns 의 디렉터리 구성, 모듈 의존 관계와 요청 한 건이 처리되는 흐름을 정리한다. 설계 *이유*(Why)는 해당 코드 주석에 있다 — 여기서는 **어떻게 연결되고 흐르는가**만 다룬다.
+
+## 디렉터리
+
+```
+cmd/psdns           CLI 진입점 (resolve / proxy / run / update / gui / version)
+cmd/psdns-gui       GUI 진입점 (Wails 데스크톱 앱 + 정적 프런트엔드, Node 불필요)
+internal/config     런타임 설정
+internal/doh        DoH 클라이언트 (RFC 8484)
+internal/resolver   host -> IP 해석 (TTL 캐시, DoH 실패 시 OS 폴백)
+internal/dnssrv     로컬 DNS 서버 (UDP/TCP -> DoH)
+internal/proxy      HTTP CONNECT + SOCKS5 프록시 + 릴레이
+internal/frag       ClientHello 파싱 및 분할 전략
+internal/supervisor 서버 start/stop 오케스트레이션 (GUI가 구동)
+internal/gui        Wails 바인딩 (App 메서드·트레이/닫기 동작, 프런트엔드가 호출)
+internal/uiconfig   GUI 설정 DTO ↔ config 변환·검증
+internal/sysproxy   시스템 웹 프록시 자동 설정/복원 (GUI 전용, OS별)
+internal/selfupdate GitHub Releases 자동 업데이트 (확인·검증·교체)
+internal/relaunch   GUI 업데이트 후 재실행 핸드오프
+docs/               설계 문서 (구조·릴리즈·측정·우회 전략 로드맵)
+scripts/            크로스 빌드·패키징·릴리즈·벤치마크 스크립트
+.github/workflows   CI(ci.yml) · 릴리즈 자동화(release.yml, 태그 push·OS별 매트릭스)
+```
 
 ## 모듈 의존 관계
 
