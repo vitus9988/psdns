@@ -264,7 +264,7 @@ jobs:
   # created by GITHUB_TOKEN never trigger other workflows, so a separate
   # `on: release` verify workflow would never fire. A verify failure fails this
   # run, which release-test.sh treats like any failed rc run (tag recovery).
-  # GUI 는 headless 로 확인 불가 — 실기기 확인은 사람 몫(README §테스트 채널).
+  # GUI 는 headless 로 확인 불가 — 실기기 확인은 사람 몫(docs/release.md §테스트 채널).
   verify:
     name: verify ${{ matrix.label }}
     needs: release

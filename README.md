@@ -1,254 +1,100 @@
 # psdns
 
-**personal dns** — 유료 VPN 구독이나 원격 서버 없이, 개인 PC에서 동작하는 크로스플랫폼 차단 우회 도구.
+**personal dns** — 유료 VPN이나 원격 서버 없이 내 PC에서 돌아가는 차단 우회 도구입니다. Windows · macOS · Linux를 지원합니다.
 
-- **DNS 차단 우회** — 모든 질의를 DNS-over-HTTPS(DoH)로 직접 해석해 통신사 DNS 위조(차단 페이지로의 응답 변조)를 무력화합니다.
-- **HTTPS(SNI) 차단 우회** — 로컬 프록시가 업스트림으로 보내는 TLS ClientHello를 여러 조각으로 나눠 전송해, 통신사 DPI가 평문 SNI를 파싱하지 못하게 합니다.
+- **DNS 차단 우회** — 통신사 DNS 대신 DNS-over-HTTPS(DoH)로 주소를 찾아, 차단 페이지(warning.or.kr 등)로 보내지는 것을 막습니다.
+- **HTTPS(SNI) 차단 우회** — 접속할 사이트 이름이 담긴 첫 패킷을 잘게 나눠 보내 통신사가 읽지 못하게 합니다.
 
-순수 유저스페이스(일반 소켓 write)만 사용하므로 Windows / macOS / Linux에서 동일하게 동작하고, 관리자 권한도 필요 없습니다(시스템 DNS 모드 제외, macOS에서는 GUI의 시스템 프록시 자동 설정에 관리자 권한이 필요할 수 있음).
+관리자 권한 없이 동작합니다(시스템 DNS 모드 제외). 터미널용 CLI(`psdns`)와 버튼 하나로 켜고 끄는 데스크톱 앱(`psdns-gui`)이 한 압축 파일에 들어 있습니다.
 
-**두 가지 형태로 제공됩니다.** 터미널용 CLI(`psdns`)와, 처음 쓰는 사람도 큰 버튼 하나로 켜고 끌 수 있는 데스크톱 GUI(`psdns-gui`)입니다. 두 실행파일은 같은 릴리즈 아카이브에 함께 들어 있습니다.
-
-> ⚠️ SNI 우회 효과는 통신사 DPI 구현에 따라 달라지며 **100% 보장되지 않습니다.** 일부 사이트/회선에서는 통하지 않을 수 있습니다.
-
-## 동작 원리
-
-| 차단 방식 | 통신사 동작 | psdns 대응 |
-|---|---|---|
-| DNS 차단 | 차단 도메인 질의에 위조 응답(warning.or.kr 등) 반환 | DoH로 직접 해석 → 통신사 DNS를 거치지 않음 |
-| SNI 기반 HTTPS 차단 | TLS ClientHello의 평문 SNI를 DPI로 검사 후 TCP RST 주입 | ClientHello를 여러 TCP 세그먼트/TLS 레코드로 분할 → DPI의 SNI 파싱 실패 |
-
-프록시 모드는 클라이언트↔서버 TCP를 종단 분리하므로, 업스트림으로 나가는 세그먼트 경계를 완전히 제어할 수 있습니다. 이름 해석도 프록시 내부에서 DoH로 처리하므로 DNS·SNI 차단을 한 번에 우회합니다.
-
-### psdns가 하는 것 / 하지 않는 것
-
-| | 내용 |
+| | |
 |---|---|
-| ✅ 한다 | 통신사 **DNS 위조**를 DoH 직접 해석으로 우회 |
-| ✅ 한다 | **SNI 기반 HTTPS 차단**을 ClientHello 분할로 우회 (효과는 DPI 구현에 따라) |
-| ❌ 아니다 | **VPN/풀터널이 아님** — 전체 트래픽을 터널링하지 않고 IP·위치를 숨기지 않음 |
-| ❌ 못 한다 | **IP 기반 차단** 우회 — 통신사가 목적지 IP로 직접 막으면 효과 없음 |
-| ⚠️ 보장 안 됨 | DPI 종류·**통신사 정책 변경**에 따라 무력화될 수 있음 |
+| ✅ 한다 | 통신사 **DNS 위조**와 **SNI 기반 HTTPS 차단** 우회 |
+| ❌ 아니다 | **VPN이 아님** — 트래픽을 터널링하지 않고 IP·위치를 숨기지 않음 |
+| ❌ 못 한다 | 통신사가 **IP 주소로** 직접 막은 차단 |
+| ⚠️ 보장 안 됨 | SNI 우회는 통신사 장비·정책에 따라 안 통할 수 있음 |
 
-## 설치 (릴리즈 바이너리)
+## 설치
 
-빌드 없이 바로 쓰려면 [GitHub Releases](https://github.com/vitus9988/psdns/releases)에서 OS/아키텍처에 맞는 아카이브를 받아 **압축만 풀면 됩니다.** 각 아카이브에는 CLI(`psdns`)와 GUI(`psdns-gui`)가 함께 들어 있습니다. CLI는 의존성 없는 단일 정적 실행파일이고, GUI는 OS에 내장된 웹뷰(Windows = WebView2, macOS = WebKit, Linux = WebKitGTK)를 사용합니다(Linux는 트레이 표시에 `libayatana-appindicator3`도 필요).
+[GitHub Releases](https://github.com/vitus9988/psdns/releases)에서 OS에 맞는 파일을 받아 **압축만 풀면 됩니다.**
 
-| OS | 아카이브 | GUI 포함 |
+| OS | 파일 | GUI 포함 |
 |---|---|---|
 | Windows | `psdns_<버전>_windows_<amd64\|arm64>.zip` | amd64만 |
-| macOS | `psdns_<버전>_darwin_<amd64\|arm64>.tar.gz` | 둘 다 (universal) |
+| macOS | `psdns_<버전>_darwin_<amd64\|arm64>.tar.gz` | 둘 다 |
 | Linux | `psdns_<버전>_linux_<amd64\|arm64>.tar.gz` | amd64만 |
 
-> ARM(Windows/Linux arm64) 아카이브는 현재 CLI만 포함합니다.
+Linux GUI는 WebKitGTK와 트레이용 `libayatana-appindicator3`가 필요합니다. 파일 검증(선택): `shasum -a 256 -c psdns_<버전>_checksums.txt` (Windows는 `CertUtil -hashfile <파일> SHA256`).
 
-```sh
-# 예: macOS Apple Silicon
-tar -xzf psdns_v1.0.0_darwin_arm64.tar.gz
-cd psdns_v1.0.0_darwin_arm64
-./psdns version
-./psdns proxy
+> **macOS에서 "확인할 수 없습니다" 경고가 뜨면** (아직 Apple 공증 전이라 뜹니다) 아래 중 하나로 한 번만 허용하세요.
+> - 압축 푼 폴더에서 `./psdns gui` 실행 — 가장 간단하고, 이후에는 더블클릭으로 열립니다.
+> - 터미널에서 `xattr -dr com.apple.quarantine psdns.app`
+> - Finder에서 `psdns.app` 우클릭 → **열기** → 다시 **열기**
+
+## GUI 사용법
+
+`psdns-gui`(macOS는 `psdns.app`)를 실행하고 **보호 시작하기**를 누르면 됩니다.
+
+- 컴퓨터의 시스템 프록시를 psdns로 자동 설정하고, 보호를 끄거나 앱을 종료하면 원래대로 되돌립니다. 자동 설정을 원하지 않으면 **시스템 프록시 자동 설정** 토글을 끄고 화면의 주소를 직접 넣으세요.
+- Firefox는 프록시 설정이 기본값('시스템 프록시 설정 사용')이면 함께 적용되고, 직접 지정했다면 그 설정을 따릅니다.
+- **psdns를 켰을 때만 안 열리는 사이트**는 고급 설정의 **프록시 예외 사이트**에 적으세요(예: `mybank.co.kr`). 그 사이트와 하위 도메인은 psdns를 거치지 않습니다.
+- 창을 닫아도(X) 트레이(macOS는 메뉴바)에서 계속 동작합니다. 완전히 끄려면 트레이 아이콘 우클릭 → **종료하기**.
+- 기본 포트(8080·1080)가 사용 중이면 다른 빈 포트로 켜고 창에 실제 주소를 보여 줍니다.
+- 새 버전이 나오면 앱이 알려 주고, 버튼 하나로 업데이트합니다.
+
+## CLI 사용법
+
+```
+psdns proxy     로컬 HTTP·SOCKS5 프록시 실행 (권장)
+psdns resolve   로컬 DNS 서버 실행 (DNS 차단만 우회)
+psdns run       둘 다 실행
+psdns update    최신 버전으로 업데이트 (-check 는 확인만)
+psdns gui       (macOS) 경고 해제 후 GUI 실행
+psdns version   버전 출력
 ```
 
-**GUI로 쓰려면** 압축을 푼 뒤 `psdns-gui`(macOS는 `psdns.app`)를 실행하세요. 창이 열리면 **보호 시작하기** 버튼 하나면 됩니다 — 기본적으로 이 컴퓨터의 시스템 웹 프록시(http·https)를 psdns로 **자동 설정**하므로 브라우저 프록시를 직접 켤 필요가 없고, 보호를 중지하거나 앱을 종료하면 **원래대로 되돌립니다.** (자동 설정을 끄려면 화면의 **시스템 프록시 자동 설정** 토글을 끄고, 표시되는 프록시 주소를 복사해 직접 넣으면 됩니다. Firefox는 프록시 설정이 기본값('시스템 프록시 설정 사용')이면 함께 적용되고, 직접 지정했다면 그 설정을 따릅니다.) **psdns를 켰을 때만 안 열리는 사이트가 있으면** 고급 설정의 **프록시 예외 사이트**에 적으세요(예: `mybank.co.kr`) — 그 사이트와 하위 도메인은 psdns를 거치지 않고 평소처럼 접속되며(차단 우회도 적용되지 않음), 목록은 다음 실행에도 유지됩니다. 창의 닫기(X) 버튼을 누르면 앱이 종료되지 않고 트레이(macOS는 메뉴바) 아이콘으로 최소화되어 보호가 계속 동작합니다 — 완전히 끄려면 트레이 아이콘을 우클릭해 **종료하기**를 선택하세요(아이콘을 클릭하면 창이 다시 열립니다). 이미 실행 중인 상태에서 다시 실행하면 새 창이 따로 열리는 대신 기존 창이 앞으로 나옵니다. 새 버전이 나오면 앱이 알려 주고 버튼 하나로 업데이트합니다(아래 [자동 업데이트](#자동-업데이트) 참고).
+**프록시 모드(권장):** `psdns proxy` 를 실행하고 브라우저나 시스템 프록시를 `127.0.0.1:8080`(HTTP) 또는 `127.0.0.1:1080`(SOCKS5)로 지정합니다.
 
-> **macOS에서 "확인할 수 없습니다" 경고가 뜨면** — 현재 릴리즈는 Apple 공증(notarization) 전이라 Gatekeeper가 실행을 막을 수 있습니다(*"Apple은 'psdns'에 … 악성 코드가 없음을 확인할 수 없습니다"*). 아래 중 하나로 한 번만 허용하면 됩니다:
-> - **`psdns gui` (가장 간단)**: 압축 푼 폴더에서 `./psdns gui` 를 실행하면 같은 폴더의 `psdns.app` 격리를 자동으로 벗기고 GUI를 띄웁니다. 이후에는 앱을 더블클릭해도 바로 열립니다. (터미널에서 실행하는 CLI는 Gatekeeper 검사를 받지 않으므로 격리된 상태에서도 동작합니다.)
-> - **터미널(수동)**: `xattr -dr com.apple.quarantine psdns.app` 실행 후 다시 열기 (CLI도 쓰면 `xattr -dr com.apple.quarantine psdns`)
-> - **Finder**: `psdns.app`을 우클릭 → **열기** → 다시 **열기**
-> - **시스템 설정**: 한 번 실행을 시도한 뒤 **개인정보 보호 및 보안** → **그래도 열기**
->
-> 정식 서명·공증이 적용된 빌드부터는 이 단계가 필요 없습니다.
+**DNS 서버 모드:** `sudo psdns resolve`(53번 포트는 관리자 권한 필요, 아니면 `-listen 127.0.0.1:5353`) 후 OS DNS 서버를 `127.0.0.1`로 바꿉니다. SNI 차단은 우회되지 않습니다.
 
-> **Windows에서 프록시가 안 켜질 때** — 기본 포트(8080·1080)를 다른 프로그램이 쓰고 있거나, Hyper-V·WSL2·Docker Desktop이 예약한 포트 범위(`netsh int ipv4 show excludedportrange protocol=tcp`로 확인)에 걸리면, psdns-gui가 **자동으로 다른 빈 포트를 골라** 켜고 창에 실제 주소를 표시합니다 — 그 주소를 복사해 쓰면 됩니다. 8080 자체를 꼭 써야 한다면 그 포트를 점유한 프로그램을 끄거나 위 예약 범위를 조정하세요.
+> ⚠️ DNS 서버 모드를 쓰다 psdns를 끄면 **DNS 설정을 직접 원래대로(자동) 되돌리세요.** 그대로 두면 인터넷이 안 됩니다.
 
-무결성 검증: `shasum -a 256 -c psdns_<버전>_checksums.txt` (Windows는 `CertUtil -hashfile <파일> SHA256`).
+### 플래그
+
+| 플래그 | 기본값 | 설명 |
+|---|---|---|
+| `-doh URL` | `https://1.1.1.1/dns-query` | 사용할 DoH 서버 |
+| `-doh-fallbacks URLS` | (없음) | 기본 DoH가 막히거나 느릴 때 쓸 예비 서버(콤마 구분), 예: `https://8.8.8.8/dns-query,https://9.9.9.9/dns-query` |
+| `-doh-hedge-delay D` | `250ms` | 예비 DoH 서버로 넘어가기 전 대기 시간 |
+| `-bootstrap IP` | (없음) | DoH 서버 주소를 이름 대신 IP[:port]로 지정 |
+| `-frag STRATEGY` | `split` | 패킷 분할 방식: `split`(기본) / `tls-record`(split이 안 통할 때) / `none`(분할 안 함) |
+| `-frag-delay D` | `0` | 조각 사이 지연 (예: `10ms`) |
+| `-timeout D` | `10s` | 연결·질의 대기 시간 |
+| `-http` / `-socks ADDR` | `127.0.0.1:8080` / `:1080` | 프록시 주소 (`proxy`, `run`) |
+| `-listen` / `-dns ADDR` | `127.0.0.1:53` | DNS 주소 (`resolve` / `run`) |
+
+## 알아 둘 점
+
+- psdns는 프록시를 쓰도록 설정된 앱(브라우저 등)에만 적용됩니다. macOS는 시스템 프록시 변경에 관리자 권한이 필요할 수 있어, 거부되면 주소를 직접 넣어야 합니다. Linux 자동 설정은 GNOME만 지원합니다.
+- 다른 로컬 프록시(예: AdGuard)가 시스템 프록시로 동작 중이면 덮어쓰지 않고 자동 설정을 건너뜁니다.
+- **DNS 광고 차단(AdGuard 등)과 함께 쓸 때:** psdns가 주소를 직접 찾아 광고 차단이 풀릴 수 있습니다. `-doh https://dns.adguard-dns.com/dns-query`(GUI는 고급 설정의 DoH 주소)처럼 광고 차단 DoH를 지정하면 차단 우회와 광고 차단이 함께 됩니다.
+- SNI 우회가 안 통하는 사이트·회선에서는 Tor 같은 풀터널 방식이 대안입니다.
+- VPN/우회 기술 자체는 한국에서 합법입니다. 본 도구는 차단 메커니즘의 이해·연구 목적으로 제공되며, **접근 대상 콘텐츠의 적법성과 관련 정책 준수 책임은 사용자에게 있습니다.**
 
 ## 빌드
 
-Go 1.24 이상이 필요합니다. 의존성은 `go.mod`/`go.sum` 에 고정돼 있어, 클론 후 빌드하면 Go 가 알아서 받습니다.
+Go 1.24 이상이 필요합니다.
 
 ```sh
-go build ./cmd/psdns        # 현재 OS용 바이너리
+go build ./cmd/psdns
 
-# 크로스 컴파일
-GOOS=windows GOARCH=amd64 go build -o psdns.exe ./cmd/psdns
-GOOS=darwin  GOARCH=arm64 go build -o psdns      ./cmd/psdns
-GOOS=linux   GOARCH=amd64 go build -o psdns      ./cmd/psdns
-```
-
-### GUI 빌드 (선택)
-
-GUI(`psdns-gui`)는 [Wails](https://wails.io)로 빌드하며, CLI와 달리 **OS별 네이티브 툴체인(CGO)**이 필요해 크로스 컴파일은 불가합니다. [Wails 사전 요구사항](https://wails.io/docs/gettingstarted/installation)을 갖춘 뒤:
-
-```sh
+# GUI (Wails, OS별 네이티브 빌드만 가능)
 go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 cd cmd/psdns-gui && wails build      # build/bin/ 에 산출
 # Linux는 libgtk-3-dev, libwebkit2gtk-4.1-dev, libayatana-appindicator3-dev(트레이) 설치 후 `wails build -tags webkit2_41`
 ```
 
-프런트엔드는 빌드 단계가 없는 정적 HTML/CSS/JS라 Node가 필요 없습니다.
-
-## 사용법
-
-```
-psdns resolve [flags]   로컬 DoH 리졸버 실행 (OS DNS를 이 주소로 지정)
-psdns proxy   [flags]   로컬 HTTP CONNECT + SOCKS5 프록시 실행 (브라우저를 이 주소로 지정)
-psdns run     [flags]   리졸버와 프록시를 동시에 실행
-psdns update  [flags]   최신 릴리즈를 받아 자신을 교체 (-check 는 새 버전 확인만)
-psdns gui               (macOS) psdns.app 격리(quarantine) 해제 후 실행 — Gatekeeper 경고 회피
-psdns version           버전 출력
-```
-
-> 터미널이 익숙하지 않다면 GUI(`psdns-gui`, macOS는 `psdns.app`)를 실행하세요. 아래 모든 기능(모드 선택·분할 전략·고급 설정)을 버튼과 토글로 제어하고, 프록시 주소 복사·자동 업데이트까지 한 화면에서 처리합니다.
-
-### 권장: 프록시 모드 (자기완결적, 권한 불필요)
-
-```sh
-psdns proxy
-# HTTP CONNECT  127.0.0.1:8080
-# SOCKS5        127.0.0.1:1080
-```
-
-브라우저/시스템 프록시를 `127.0.0.1:8080`(HTTP) 또는 `127.0.0.1:1080`(SOCKS5)로 지정하면 됩니다. 시스템 DNS를 바꿀 필요가 없습니다.
-
-### DNS 리졸버 모드 (시스템 전역 DNS 우회)
-
-```sh
-sudo psdns resolve                       # 표준 53번 포트는 권한 필요
-psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
-```
-
-그 후 OS의 DNS 서버를 `127.0.0.1`로 설정합니다. (DNS 차단만 우회되며, SNI 차단은 우회되지 않습니다.)
-
-> ⚠️ **이 DNS 설정은 psdns가 되돌려 주지 않습니다.** 시스템 프록시 자동 설정(GUI)과 달리 OS DNS 서버는 사용자가 직접 바꾸는 값이라 psdns가 건드리지 않으며, 따라서 종료 시 자동 복원도 되지 않습니다. **psdns를 끄거나 종료하면 DNS 설정을 원래대로(자동/DHCP) 되돌리세요** — `127.0.0.1`을 가리킨 채로 두면 psdns가 실행되지 않는 동안 이름 해석이 전혀 되지 않아 인터넷이 안 됩니다. 이 설정이 필요 없는 프록시 모드(권장)를 쓰면 이런 뒷정리가 없습니다.
-
-### 공통 플래그
-
-| 플래그 | 기본값 | 설명 |
-|---|---|---|
-| `-doh URL` | `https://1.1.1.1/dns-query` | 업스트림 DoH 엔드포인트 |
-| `-bootstrap IP` | (없음) | DoH 호스트를 해석할 IP[:port] (시스템 DNS 우회) |
-| `-doh-fallbacks URLS` | (없음) | 기본 DoH가 느리거나 실패할 때 시도할 fallback DoH 엔드포인트(콤마 구분) |
-| `-doh-hedge-delay D` | `250ms` | 다음 fallback DoH 질의를 시작하기 전 대기 시간 |
-| `-frag STRATEGY` | `split` | ClientHello 분할 전략: `none` / `split` / `tls-record` |
-| `-frag-delay D` | `0` | 조각 사이 지연 (예: `10ms`) |
-| `-timeout D` | `10s` | dial/질의 타임아웃 |
-| `-pprof ADDR` | (없음) | `net/http/pprof` 프로파일링 서버 주소 (디버그·측정용, 기본 꺼짐 → [측정 가이드](docs/measurements.md)) |
-
-- `-http ADDR` / `-socks ADDR` : 프록시 listen 주소 (`proxy`, `run`)
-- `-listen ADDR` : DNS listen 주소 (`resolve`)
-- `-dns ADDR` : DNS listen 주소 (`run`)
-
-### 분할 전략
-
-- **`split`** (기본): ClientHello를 여러 TCP 세그먼트로 나눠 전송. SNI 호스트명 위치를 찾아 그 내부에서 자르고, 파싱 실패 시 레코드 헤더 직후에서 자릅니다.
-- **`tls-record`**: ClientHello 핸드셰이크를 여러 TLS 레코드로 재구성(RFC 8446 §5.1 허용). 첫 레코드만 검사하는 DPI를 회피합니다.
-- **`none`**: 분할 없음 (DNS 차단만 우회, 비교/디버그용).
-
-기본 DoH 엔드포인트는 IP 리터럴 호스트(`1.1.1.1`)라서 DoH 연결 자체에는 SNI가 실리지 않고 DNS 부트스트랩도 필요 없습니다.
-기본 엔드포인트가 막히거나 느린 회선에서는 `-doh-fallbacks https://8.8.8.8/dns-query,https://9.9.9.9/dns-query`처럼 fallback을 지정할 수 있습니다. psdns는 기본 DoH를 먼저 쓰고, `-doh-hedge-delay` 동안 응답이 없거나 실패하면 fallback을 순차적으로 시작해 첫 성공 응답을 사용합니다.
-
-## 한계 및 고지
-
-- **psdns는 VPN이 아닙니다.** 전체 트래픽을 암호화 터널로 보내지 않고, 사용자의 IP 주소나 위치도 숨기지 않습니다. **DNS 위조와 SNI 기반 차단** 두 가지 기법만 무력화합니다 — 풀터널 익명성이 필요하면 Tor 등이 대안입니다.
-- **IP 기반 차단은 우회하지 못합니다.** 통신사가 도메인이 아니라 목적지 **IP 주소로** 직접 차단하면 psdns로는 뚫리지 않습니다(이름 해석·SNI 단계가 아니라 IP 라우팅 단계의 차단이기 때문입니다).
-- **SNI fragmentation 효과는 통신사 DPI 구현에 의존하므로 모든 사이트/회선에서 보장되지 않습니다.** 안 통하는 경우 ECH(대상 사이트가 지원할 때) 또는 Tor 등 풀터널 방식이 대안입니다.
-- **통신사 정책이 바뀌면 무력화될 수 있습니다.** DPI가 분할된 세그먼트를 재조립한 뒤 SNI를 검사하거나 DoH 엔드포인트(IP) 자체를 차단하기 시작하면 효과가 사라질 수 있습니다. psdns가 철학(순수 유저스페이스·무설치·경량)을 지키며 추가로 적용할 수 있는 우회 전략 로드맵은 [`docs/bypass-roadmap.md`](docs/bypass-roadmap.md)에 정리돼 있습니다.
-- 프록시 모드는 해당 프록시를 사용하도록 설정한 앱(브라우저 등)에만 적용됩니다. GUI의 시스템 프록시 자동 설정도 OS 프록시를 따르는 앱에만 적용되며, 프록시를 직접 지정한 앱은 그 설정을 따릅니다. **macOS에서는 시스템 프록시 변경에 관리자 권한이 필요할 수 있어** 자동 설정이 거부되면 주소를 복사해 직접 넣어야 합니다(Windows·Linux는 사용자 권한, Linux는 GNOME만 지원).
-- 시스템 프록시 설정은 앱을 종료하는 모든 경로(트레이 **종료하기**, 앱 내 종료, macOS ⌘Q·Dock 종료, 로그아웃, `kill`)에서 되돌립니다. 강제 종료로 설정이 남아도 다음 실행 때 정리되며(그 사이 직접 바꾼 설정은 존중), 정리에 실패하면 화면에 알려 줍니다. **다른 로컬 프록시(예: AdGuard)가 시스템 프록시로 설정돼 실제로 동작 중이면** 덮어쓰지 않고 자동 설정을 건너뜁니다 — 그 앱을 끄거나, 자동 설정을 끄고 psdns 주소를 직접 넣으세요. 응답하지 않는 죽은 프록시 설정(비정상 종료한 이전 psdns의 잔재 등)은 이어받습니다.
-- 프록시는 이름을 DoH로 해석하되, DoH가 주소를 주지 못하는 이름(사내망·`.local` 기기·hosts 파일 항목 등)만 OS DNS로 한 번 더 찾습니다. DoH가 답한 이름은 OS DNS를 쓰지 않으므로 통신사 DNS 위조 우회는 그대로입니다.
-- **DNS 기반 광고 차단(AdGuard 등)과 함께 쓸 때:** psdns 프록시를 거친 요청은 이름 해석을 통신사 DNS가 아닌 psdns 내부 DoH로 직접 처리하므로, DNS 단계에서 광고를 막는 도구의 차단이 우회되어 광고가 다시 보일 수 있습니다(psdns의 핵심 동작인 DNS 우회의 부작용). 광고 차단을 유지하려면 `-doh`를 광고 차단 DoH 엔드포인트로 지정하세요(예: `psdns proxy -doh https://dns.adguard-dns.com/dns-query`, GUI는 고급 설정의 DoH 입력란). 그러면 psdns의 해석 자체가 광고 차단 DNS를 거쳐 **통신사 DNS 위조는 우회하면서 광고 도메인은 차단**됩니다.
-- VPN/우회 기술 자체는 한국에서 합법입니다. 본 도구는 차단 메커니즘의 이해·연구 목적으로 제공되며, **접근 대상 콘텐츠의 적법성과 관련 정책 준수 책임은 사용자에게 있습니다.**
-
-## 자동 업데이트
-
-GUI(`psdns-gui`)는 시작할 때 [GitHub Releases](https://github.com/vitus9988/psdns/releases)에서 최신 버전을 확인하고, 새 버전이 있으면 배너로 알립니다. **업데이트** 버튼을 누르면 현재 OS/아키텍처 아카이브를 내려받아 published `checksums.txt`로 SHA-256 검증한 뒤, 실행 파일을 원자적으로 교체하고 재시작합니다(Windows의 실행 중 교체 포함). 검증에 실패하면 교체하지 않고 릴리즈 페이지 링크를 안내합니다. 개발 빌드(`dev`)나 정식 태그가 아닌 빌드는 자동 적용 대상에서 제외됩니다.
-
-CLI(`psdns`)는 `psdns update`로 같은 검증을 거쳐 자신을 교체합니다(`psdns update -check`는 새 버전 존재 여부만 확인하고 교체하지 않음). `proxy`·`run`으로 장시간 실행 중이면 시작 시 새 버전이 있을 때 로그로 한 줄 알려 주며(자동 적용은 하지 않음), 교체 후에는 프로세스를 다시 실행해야 새 버전이 적용됩니다.
-
-## 릴리즈 발행
-
-버전 태그를 push하면 GitHub Actions(`.github/workflows/release.yml`)가 **OS별 러너**에서 빌드해 6개 아카이브를 Release로 자동 게시합니다. mainstream 4개 타깃(macOS amd64·arm64, Windows amd64, Linux amd64)에는 CLI와 GUI가 함께, ARM 2개 타깃(Windows/Linux arm64)에는 CLI만 담깁니다. (CLI는 `CGO_ENABLED=0`으로 어디서나 크로스 컴파일되지만, Wails GUI는 OS별 네이티브 빌드가 필요해 매트릭스를 씁니다.)
-
-```sh
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-로컬에서 만들려면 `scripts/build-release.sh [버전]` → `dist/`. CLI 6타깃은 항상 빌드되고, GUI는 (Wails CLI가 있으면) **빌드를 실행한 호스트 OS용 아카이브에만** 포함됩니다. 전체 플랫폼 GUI는 CI에서 생성됩니다.
-
-### 테스트 채널 (프리릴리즈)
-
-서명·포트·패키징 같은 산출물 전용 문제는 실제 릴리즈에서만 드러나므로, 정식 배포 전에 **프리릴리즈로 실물을 검증**합니다.
-
-1. 수정사항을 `test` 브랜치에 push → `ci.yml`(gofmt·vet·lint·테스트·커버리지·GUI 테스트)이 돕니다.
-2. 프리릴리즈 태그를 push → `release.yml`이 6개 아카이브를 **프리릴리즈**로 게시하고, 이어서 `verify` 잡이 3개 OS 러너에서 산출물을 내려받아 체크섬과 CLI 동작(버전 일치·프록시 스모크)을 **자동 검증**합니다. GUI 동작은 실제 Windows/macOS에서 받아 확인합니다.
-   ```sh
-   git tag v1.0.0-rc.1 && git push origin v1.0.0-rc.1
-   ```
-3. 통과하면 `test` → `main` 으로 병합합니다(브랜치 보호 시 PR 경로 — 아래 참고, `--pr` 로 강제 가능).
-4. `main`에서 접미사 없는 정식 태그를 push → 정식 릴리즈됩니다.
-
-1–2단계(테스트 프리릴리즈)는 `scripts/release-test.sh`, 3–4단계(정식 릴리즈)는 `scripts/release-main.sh` 로 자동화돼 있습니다(둘 다 `--dry-run` 으로 계획만 확인 가능). `release-test.sh` 는 현재 변경을 `test` 에 커밋·push 한 뒤 다음 `vX.Y.Z-rc.N` 을 자동 증가시켜 태그하고, **태그 push 후 릴리즈 런을 끝까지 감시해 실패하면 rc 태그를 자동 회수**합니다 — 다음 시도가 같은 번호를 재사용하므로 고아 태그가 남지 않습니다(`--no-wait` 로 감시 생략, 타임아웃·Ctrl-C 는 회수하지 않음). `release-main.sh` 는 `test` → `main` 병합·push 후 접미사를 뗀 정식 `vX.Y.Z` 를 태그하고 같은 방식으로 런을 감시하지만, **정식 태그는 실패해도 회수하지 않고** 재실행(`gh run rerun`)을 안내합니다(버전 생략 시 가장 높은 `-rc` 태그에서 도출). 릴리즈 본문은 conventional commit 커밋 메시지를 분류해 자동 생성합니다(`scripts/release-notes.sh`). 정식 태그가 게시되면 `release.yml` 이 그 버전의 `-rc` 프리릴리즈/태그를 **자동으로 정리**합니다(`scripts/prune-rc.sh` — 정식 없이 버려진 버전 라인은 로컬에서 `bash scripts/prune-rc.sh --dry-run vX.Y.Z` 로 확인 후 직접 정리할 수 있습니다). 런 감시·회수·정리에는 [GitHub CLI(`gh`)](https://cli.github.com) 로그인이 필요하며, 없으면 릴리즈 스크립트는 해당 단계만 건너뜁니다(push·태그까지는 종전 동작과 동일. 단독 실행하는 `verify-release.sh`·`prune-rc.sh` 는 gh 필수).
-
-**main 브랜치 보호(선택):** PR 필수·CI 통과 필수 보호를 켜려면 아래 ruleset 을 한 번 적용합니다. 이후 `release-main.sh` 는 직접 push 가 거부되면 자동으로 PR 경로를 사용합니다(필수 체크 이름 3종은 `ci.yml` 의 잡 이름과 일치해야 합니다):
-
-```sh
-gh api -X POST repos/vitus9988/psdns/rulesets --input - <<'JSON'
-{ "name": "protect-main", "target": "branch", "enforcement": "active",
-  "conditions": { "ref_name": { "include": ["refs/heads/main"], "exclude": [] } },
-  "rules": [
-    { "type": "pull_request", "parameters": { "required_approving_review_count": 0,
-        "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false,
-        "require_last_push_approval": false, "required_review_thread_resolution": false } },
-    { "type": "required_status_checks", "parameters": { "strict_required_status_checks_policy": false,
-        "required_status_checks": [ { "context": "lint + test" },
-          { "context": "gui vet + test (macos-latest)" }, { "context": "gui vet + test (windows-latest)" } ] } },
-    { "type": "deletion" }, { "type": "non_fast_forward" } ] }
-JSON
-```
-
-`-`가 들어간 태그(`v1.0.0-rc.1`)는 자동으로 GitHub 프리릴리즈로 게시되며, `/releases/latest`가 프리릴리즈를 제외하므로(그리고 안정 빌드는 프리릴리즈로 자동 업데이트되지 않으므로) **기존 사용자에게 자동 배포되지 않습니다.** 접미사 없는 `vX.Y.Z`만 모든 사용자에게 자동 업데이트로 제안됩니다.
-
-### macOS 서명·공증 (선택)
-
-macOS `psdns.app`의 Gatekeeper 경고를 없애려면 Apple Developer Program(연 $99) 계정으로 Developer ID 서명·공증을 적용합니다. 다음 GitHub Secrets를 설정하면 릴리즈 워크플로가 자동으로 서명·공증·스테이플합니다(설정 전에는 미서명으로 빌드되어 릴리즈가 그대로 동작):
-
-| Secret | 설명 |
-|---|---|
-| `MACOS_CERT_P12_BASE64` | Developer ID Application 인증서(.p12)를 base64로 인코딩한 값 |
-| `MACOS_CERT_PASSWORD` | 위 .p12 내보내기 암호 |
-| `MACOS_SIGN_IDENTITY` | 서명 식별자, 예: `Developer ID Application: MinSeong Kim (TEAMID)` |
-| `MACOS_NOTARY_APPLE_ID` | 공증용 Apple ID 이메일 |
-| `MACOS_NOTARY_PASSWORD` | 공증용 앱 암호(app-specific password) |
-| `MACOS_NOTARY_TEAM_ID` | Apple Developer 팀 ID |
-
-서명만 하고 공증 자격증명(`MACOS_NOTARY_*`)이 없으면 서명까지만 적용됩니다(이 경우 Gatekeeper 경고는 남습니다). 번들 식별자는 `io.github.vitus9988.psdns`이며 `MACOS_BUNDLE_ID` 환경변수로 바꿀 수 있습니다.
-
-## 구조
-
-```
-cmd/psdns           CLI 진입점 (resolve / proxy / run / update / gui / version)
-cmd/psdns-gui       GUI 진입점 (Wails 데스크톱 앱 + 정적 프런트엔드)
-internal/config     런타임 설정
-internal/doh        DoH 클라이언트 (RFC 8484)
-internal/resolver   host -> IP 해석 (TTL 캐시, DoH 실패 시 OS 폴백)
-internal/dnssrv     로컬 DNS 서버 (UDP/TCP -> DoH)
-internal/proxy      HTTP CONNECT + SOCKS5 프록시 + 릴레이
-internal/frag       ClientHello 파싱 및 분할 전략
-internal/supervisor 서버 start/stop 오케스트레이션 (GUI가 구동)
-internal/gui        Wails 바인딩 (App 메서드·트레이/닫기 동작, 프런트엔드가 호출)
-internal/uiconfig   GUI 설정 DTO ↔ config 변환·검증
-internal/sysproxy   시스템 웹 프록시 자동 설정/복원 (GUI 전용, OS별)
-internal/selfupdate GitHub Releases 자동 업데이트 (확인·검증·교체)
-internal/relaunch   GUI 업데이트 후 재실행 핸드오프
-docs/               설계 문서 (구조·측정·우회 전략 로드맵)
-scripts/            크로스 빌드·패키징·릴리즈·벤치마크 스크립트
-.github/workflows   CI(ci.yml) · 릴리즈 자동화(release.yml, 태그 push·OS별 매트릭스)
-```
-
-모듈 의존 관계와 요청 처리 흐름(시퀀스 다이어그램)은 [`docs/architecture.md`](docs/architecture.md), 성능·측정 방법은 [`docs/measurements.md`](docs/measurements.md) 참고.
+GUI 빌드 전 [Wails 사전 요구사항](https://wails.io/docs/gettingstarted/installation)을 갖추세요. 개발 문서: [구조](docs/architecture.md) · [릴리즈 절차](docs/release.md) · [측정](docs/measurements.md) · [우회 전략 로드맵](docs/bypass-roadmap.md)
 
 ## 라이선스
 
