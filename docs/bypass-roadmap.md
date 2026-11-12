@@ -4,7 +4,7 @@
 
 ## 현재 방식과 한계
 
-SNI 우회는 로컬 프록시(`internal/proxy`의 `relay()`)가 브라우저의 첫 TLS 레코드를 떼어내 `frag.WriteFirst()` 로 **2-way 단순 분할**(TCP 세그먼트 또는 TLS 레코드)하는 것이다. DNS 우회는 DoH 단일 엔드포인트(기본 `1.1.1.1` IP 리터럴)로 직접 해석한다.
+SNI 우회는 로컬 프록시(`internal/proxy`의 `relay()`)가 브라우저의 첫 TLS 레코드를 떼어내 `frag.WriteFirst()` 로 **2-way 단순 분할**(TCP 세그먼트 또는 TLS 레코드)하는 것이다. DNS 우회는 DoH(기본 `1.1.1.1` IP 리터럴, `-doh-fallbacks` 로 hedged 폴백)로 직접 해석하고, DoH 가 주소를 주지 못하는 이름만 OS resolver 로 폴백한다.
 
 DPI 가 분할된 세그먼트를 **재조립(reassembly)** 한 뒤 SNI 를 검사하거나, DoH IP/엔드포인트 자체를 차단하기 시작하면 효과가 약해질 수 있다. 아래는 그 시나리오별 대응이다.
 
@@ -25,7 +25,7 @@ DPI 가 분할된 세그먼트를 **재조립(reassembly)** 한 뒤 SNI 를 검�
 | split | 지정 위치에서 페이로드를 여러 TCP 세그먼트로 | 불필요 (순수 write) | **이미 구현** (`split`) |
 | tls-record | ClientHello 를 여러 TLS 레코드로 재구성 | 불필요 (순수 write) | **이미 구현** (`tls-record`) |
 | multi-split / 분할점 다양화 | N-way 분할 + 자르는 위치를 SNI 시작·중앙·끝 등으로 | 불필요 (순수 write) | **가능** → §3-A |
-| 복수 DoH / hedged | 여러 DoH 엔드포인트에 동시/순차 질의 | 불필요 | **가능** → §3-B |
+| 복수 DoH / hedged | 여러 DoH 엔드포인트에 동시/순차 질의 | 불필요 | **이미 구현** (`-doh-fallbacks`) |
 | mod-http (Host 변형) | 평문 HTTP Host 헤더 대소문자 섞기·공백 조정 | 불필요 (앱 레이어) | 조건부 → §4-C1 |
 | disorder (역순 전송) | 조각을 역순으로 보냄 | **필요** — 효과를 내려면 두 번째 조각을 **TTL=1** 로 보내 서버 도달을 막아야 함 | **배제** (§5) |
 | fake packet | 진짜 데이터 앞에 가짜 패킷 주입 | **필요** — 가짜 패킷은 서버에 도달하면 안 되므로 TTL 제어 + raw socket | **배제** (§5) |
@@ -57,13 +57,13 @@ DPI 가 분할된 세그먼트를 **재조립(reassembly)** 한 뒤 SNI 를 검�
 DNS 우회가 무력화되는 1차 시나리오(통신사가 DoH IP·엔드포인트 차단) 대응. 두 개의 독립 개선이다.
 
 - **B-1. 복수 DoH 엔드포인트 hedged 폴백** (구현됨): 기본값은 여전히 단일 `1.1.1.1` 이지만, `-doh-fallbacks` 로 여러 DoH endpoint를 지정하면 첫 엔드포인트를 우선 사용하고 일정 시간 내 무응답/실패 시 다음 것을 시작해 첫 성공 응답을 채택한다. **IP 리터럴 endpoint 사용이 핵심** — DoH 연결에 SNI 가 실리지 않는 속성을 보존한다. (Cloudflare 가 먼저 차단되는 회선에서 벤더가 분산된 폴백이 실질적으로 기여한다.)
-  - 진입점: `internal/resolver/resolver.go` 의 `lookup()`(이미 A/AAAA 를 goroutine 으로 병렬 질의) 에서 `doh.Exchange` 호출부를 다중 클라이언트 인터페이스 경유로 바꾼다. `internal/config/config.go` 에 `DoHURL` 다중화(콤마 구분 또는 `DoHFallbacks` 필드). `Default()` 의 단일 `1.1.1.1` 은 유지한다.
+  - 구현: `internal/doh/client.go` 의 `NewExchanger`·`NewHedged`, `config.DoHFallbacks`.
 - **B-2. DoH HTTPS 핸드셰이크의 ClientHello 에도 frag 적용** (기본 구성에선 잠재적): 현재 `doh.New` 는 `http.Transport` 에 `DialContext` 만 주입하고 **`DialTLSContext` 가 없어** TLS 핸드셰이크가 Transport 내부에서 일어난다. 그래서 `-bootstrap` 으로 도메인 엔드포인트를 쓰면 ClientHello 에 SNI 가 실리는데 거기엔 분할이 전혀 안 걸린다. `DialTLSContext` 를 구현해, 평문 TCP 연결 → `TCP_NODELAY` → 첫 Write(ClientHello)만 `frag.WriteFirst` 로 위임하는 **shim `net.Conn`** 을 `tls.Client(shim, cfg)` 에 물리면 기존 frag 로직을 그대로 재사용한다.
-  - 진입점: `internal/doh/client.go` 의 `New` 시그니처에 frag 인자를 추가한다(호출부는 `cmd/psdns/main.go` 의 `mustDoH` 한 곳). 기본 IP-리터럴 구성에선 SNI 가 없어 **no-op** 이므로 기본 동작은 불변이다.
+  - 진입점: `internal/doh/client.go` 의 `New`(와 이를 감싸는 `NewExchanger`)에 frag 인자를 추가한다(`NewExchanger` 호출부: `cmd/psdns/main.go`·`internal/supervisor/supervisor.go`·`internal/uiconfig/uiconfig.go`). 기본 IP-리터럴 구성에선 SNI 가 없어 **no-op** 이므로 기본 동작은 불변이다.
 
 ## 4. 2순위 / 조건부 — 제약은 통과하나 효과 대비 복잡도 불리
 
-- **C-1. 평문 HTTP(80) Host 헤더 분할:** 현재 HTTP 프록시는 CONNECT 외 메서드를 501 로 거부한다. 평문 포워드 프록시를 구현하고 Host 헤더 값을 분할하거나 대소문자/공백을 변형하는 것은 순수 문자열 조작이라 제약을 통과한다. 다만 트래픽이 HTTPS 위주라 실효가 낮고 프록시 표면이 크게 늘어 "경량"과 마찰한다 → 도입하더라도 "Host 값 분할"만 하는 최소형을 권장.
+- **C-1. 평문 HTTP(80) Host 헤더 분할:** 평문 포워딩(`internal/proxy/http.go` 의 `handlePlain`)은 이미 있으므로, 남은 일은 Host 헤더 값을 분할하거나 대소문자/공백을 변형하는 것뿐이다. 순수 문자열 조작이라 제약을 통과하지만 트래픽이 HTTPS 위주라 실효가 낮다 → 도입하더라도 "Host 값 분할"만 하는 최소형을 권장.
 - **C-2. SOCKS5 UDP ASSOCIATE:** raw socket 은 아니지만, psdns 의 우회 코어인 ClientHello 분할은 TCP 세그먼테이션 개념이라 QUIC/UDP 로 그대로 옮겨가지 않는다(QUIC Initial 은 암호화되어 SNI 분할 방식이 다르다). UDP relay 의 신규 표면(소켓 수명·NAT 매핑)만 늘고 우회 효과는 없다 → 권장 안 함.
 - **D. 적응형 전략 자동선택** (`--auto` 류): 핸드셰이크 직후 RST·조기 종료·타임아웃을 감지해 다음 연결에서 다른 분할 전략으로 자동 전환하고 호스트별로 학습한다. 순수 소켓 관찰이라 제약은 충족하나, "무엇을 차단으로 볼지"의 휴리스틱과 per-host 상태로 표면이 크다 → **A 가 안정화된 뒤의 후속 연구 과제**로 둔다.
 
@@ -76,17 +76,17 @@ DNS 우회가 무력화되는 1차 시나리오(통신사가 DoH IP·엔드포�
 | TTL / autottl 조작 | IP TTL 직접 설정 = 패킷 레벨 제어 → **제약 1** 위반 |
 | ECH (Encrypted Client Hello) | 제약 위반은 아니나 **구조적으로 불가** — 프록시는 브라우저가 만든 ClientHello 를 `io.Copy` 로 그대로 릴레이할 뿐이라 SNI 를 암호화해 주입할 수 없다. ECH 는 클라이언트 TLS 스택이 직접 암호화된 ClientHello 를 생성하고 공개키를 DNS HTTPS RR 로 분배받아야 성립하며, 이는 브라우저/OS 의 몫이다. (psdns 의 DoH 리졸버가 HTTPS RR 응답을 그대로 전달하는 것까진 가능하나, 그걸 ECH 로 쓰는 주체는 브라우저다.) |
 | DoQ / DoH3 (DNS over QUIC/HTTP3) | `quic-go` 등 무거운 의존성 추가 → **제약 2** 위반. 현 RFC 8484 DoH(TCP/HTTP2)로 충분하며 QUIC 의 회복력 이점이 의존성 무게를 정당화하지 못한다. (연구 메모로만 보존.) |
-| SOCKS5 UDP relay | 우회 효과 없이 신규 표면만 증가 → **제약 2·3** 과 마찰 |
 
 ## 6. 권장 실행 순서
 
 차단이 강화되면 아래 순서로 착수한다. 전부 기존 전략과 병렬 opt-in 이며 `config.Default()` 는 불변이다.
 
 1. **A** — N-way 다중분할 · tls-record 다중화 · split-tls 하이브리드 (`internal/frag` 확장)
-2. **B-1** — 복수 DoH 엔드포인트 hedged 폴백 (`internal/resolver`·`internal/doh`·`internal/config`) — 구현됨
-3. **B-2** — DoH ClientHello 에 frag 적용 (`internal/doh` 의 `DialTLSContext` 훅)
-4. (선택) **C-1** — 평문 HTTP Host 분할 최소형
-5. (후속 연구) **D** — 적응형 자동선택
+2. **B-2** — DoH ClientHello 에 frag 적용 (`internal/doh` 의 `DialTLSContext` 훅)
+3. (선택) **C-1** — 평문 HTTP Host 분할 최소형
+4. (후속 연구) **D** — 적응형 자동선택
+
+B-1(복수 DoH hedged 폴백)은 구현을 마쳤다.
 
 ## 7. 참고 출처
 
