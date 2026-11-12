@@ -78,7 +78,7 @@ func TestApplyRestoreRoundTrip(t *testing.T) {
 	fake.install(t)
 
 	s := Settings{Host: "127.0.0.1", Port: 8080, Bypass: []string{"localhost", "127.0.0.1"}}
-	if err := Apply(s); err != nil {
+	if _, err := Apply(s); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if !backupExists() {
@@ -102,7 +102,7 @@ func TestApplyRestoreRoundTrip(t *testing.T) {
 	if before != 2 {
 		t.Fatalf("first Apply: %d list calls, want 2 (capture + apply)", before)
 	}
-	if err := Apply(s); err != nil {
+	if _, err := Apply(s); err != nil {
 		t.Fatalf("Apply(second): %v", err)
 	}
 	if got := fake.countCalls("-listallnetworkservices"); got != before+1 {
@@ -308,9 +308,13 @@ func TestApplyAdminRefusalIsFriendly(t *testing.T) {
 	}
 	fake.install(t)
 
-	err := Apply(Settings{Host: "127.0.0.1", Port: 8080})
+	touched, err := Apply(Settings{Host: "127.0.0.1", Port: 8080})
 	if err == nil {
 		t.Fatal("Apply must surface the networksetup failure")
+	}
+	// The backup was written before the OS write failed, so a restore is owed.
+	if !touched {
+		t.Error("a failure after the snapshot must report touched=true")
 	}
 	if !strings.Contains(err.Error(), "관리자 권한") {
 		t.Errorf("admin refusal must map to the friendly admin message, got %v", err)
@@ -335,7 +339,7 @@ func TestApplyGenericFailure(t *testing.T) {
 	}
 	fake.install(t)
 
-	err := Apply(Settings{Host: "127.0.0.1", Port: 8080})
+	_, err := Apply(Settings{Host: "127.0.0.1", Port: 8080})
 	if err == nil || !strings.Contains(err.Error(), "실패") {
 		t.Errorf("generic failure message expected, got %v", err)
 	}
@@ -346,8 +350,13 @@ func TestApplyCaptureFails(t *testing.T) {
 	fake := &fakeNetworksetup{failCmd: "-listallnetworkservices", failOut: "boom"}
 	fake.install(t)
 
-	if err := Apply(Settings{Host: "127.0.0.1", Port: 8080}); err == nil {
+	touched, err := Apply(Settings{Host: "127.0.0.1", Port: 8080})
+	if err == nil {
 		t.Fatal("Apply must fail when the service list is unavailable")
+	}
+	// Nothing was changed, so the caller must not think it owes a restore.
+	if touched {
+		t.Error("a capture failure must report touched=false")
 	}
 	if backupExists() {
 		t.Error("no backup may be written when capture failed")

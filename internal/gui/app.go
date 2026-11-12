@@ -364,7 +364,16 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 	// must still be undone by this session's Stop/Shutdown, not left only for the
 	// next launch's RecoverStale.
 	a.sysproxyOn = true
-	if err := sysproxyApply(s); err != nil {
+	touched, err := sysproxyApply(s)
+	if !touched {
+		// Apply gave up before changing anything (it could not snapshot or save the
+		// previous state), so this session owes no restore. Clearing the flag again
+		// matters: with it set and no backup on disk, the restore path would fall
+		// through to DisableApplied and switch off whatever proxy the user already
+		// had — one we never touched.
+		a.sysproxyOn = false
+	}
+	if err != nil {
 		a.emitSysProxy("error", "시스템 프록시 자동 설정에 실패했어요. 아래 주소를 복사해 브라우저에 직접 넣어 주세요.")
 		return
 	}

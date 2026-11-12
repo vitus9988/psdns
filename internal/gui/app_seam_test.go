@@ -132,8 +132,11 @@ func TestStartStopAppliesAndRestoresSystemProxy(t *testing.T) {
 	// No conflicting local proxy, so the apply path proceeds (and stays hermetic —
 	// the default would shell out to the OS to read the real proxy state).
 	sysproxyCurrent = func() (sysproxy.DetectedProxy, error) { return sysproxy.DetectedProxy{}, nil }
-	restored := 0
+	restored, disabled := 0, 0
 	sysproxyRestore = func() (bool, error) { restored++; return true, nil }
+	prevDisable := sysproxyDisable
+	sysproxyDisable = func() error { disabled++; return nil }
+	t.Cleanup(func() { sysproxyDisable = prevDisable })
 
 	newApp := func(t *testing.T) *App {
 		a := NewApp("t")
@@ -147,7 +150,7 @@ func TestStartStopAppliesAndRestoresSystemProxy(t *testing.T) {
 	}
 
 	// Apply fails → the error toast is emitted and the restore is still owed.
-	sysproxyApply = func(sysproxy.Settings) error { return errors.New("refused") }
+	sysproxyApply = func(sysproxy.Settings) (bool, error) { return true, errors.New("refused") }
 	a := newApp(t)
 	if _, err := a.Start("proxy"); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -167,7 +170,7 @@ func TestStartStopAppliesAndRestoresSystemProxy(t *testing.T) {
 
 	// Apply succeeds → the applied toast is emitted, Stop restores again.
 	*events = nil
-	sysproxyApply = func(sysproxy.Settings) error { return nil }
+	sysproxyApply = func(sysproxy.Settings) (bool, error) { return true, nil }
 	b := newApp(t)
 	if _, err := b.Start("proxy"); err != nil {
 		t.Fatalf("Start#2: %v", err)
@@ -180,6 +183,28 @@ func TestStartStopAppliesAndRestoresSystemProxy(t *testing.T) {
 	}
 	if !slices.Contains(*events, "sysproxy:restored") || restored != 2 {
 		t.Fatalf("want sysproxy:restored toast (restored=%d), got %v", restored, *events)
+	}
+
+	// Apply gives up before touching the OS (snapshot failed) → nothing is owed.
+	// If sysproxyOn stayed set, Stop would find no backup and fall through to
+	// DisableApplied, switching off a proxy the user had and we never changed.
+	*events = nil
+	sysproxyApply = func(sysproxy.Settings) (bool, error) { return false, errors.New("capture failed") }
+	c := newApp(t)
+	if _, err := c.Start("proxy"); err != nil {
+		t.Fatalf("Start#3: %v", err)
+	}
+	if c.sysproxyOn {
+		t.Fatal("an untouched apply must not owe a restore")
+	}
+	if !slices.Contains(*events, "sysproxy:error") {
+		t.Fatalf("want sysproxy:error toast, got %v", *events)
+	}
+	if _, err := c.Stop(); err != nil {
+		t.Fatalf("Stop#3: %v", err)
+	}
+	if restored != 2 || disabled != 0 {
+		t.Fatalf("Stop must not restore or disable (restored=%d, disabled=%d)", restored, disabled)
 	}
 }
 
@@ -196,7 +221,7 @@ func swapConflictSeams(t *testing.T, cur sysproxy.DetectedProxy, alive bool) (ap
 	})
 	sysproxySupported = func() bool { return true }
 	var did bool
-	sysproxyApply = func(sysproxy.Settings) error { did = true; return nil }
+	sysproxyApply = func(sysproxy.Settings) (bool, error) { did = true; return true, nil }
 	sysproxyRestore = func() (bool, error) { return true, nil }
 	sysproxyCurrent = func() (sysproxy.DetectedProxy, error) { return cur, nil }
 	sysproxyAlive = func(string, int, time.Duration) bool { return alive }

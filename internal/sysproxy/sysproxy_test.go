@@ -469,7 +469,7 @@ func TestApplyNeutralizesPoisonedCapture(t *testing.T) {
 	osApply = func(s Settings) error { applied = append(applied, s); return nil }
 
 	s := Settings{Host: "127.0.0.1", Port: 8080}
-	if err := Apply(s); err != nil {
+	if _, err := Apply(s); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if len(applied) != 1 || applied[0].Port != 8080 {

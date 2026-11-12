@@ -137,11 +137,18 @@ func Alive(host string, port int, timeout time.Duration) bool {
 // On error the OS may be left partially modified and the backup has already been
 // written, so the caller MUST still arrange for Restore to run (e.g. on stop): a
 // failed Apply does not mean the OS was left untouched.
-func Apply(s Settings) error {
+//
+// touched says whether it got as far as changing the OS. It is false only when
+// the snapshot could not be taken or written — the two failures that leave the
+// OS exactly as it was, with no backup. Callers need that distinction: without
+// it, a proxy this process never applied looks identical to one whose backup went
+// missing, and "put it back somehow" would switch off a setting that was never
+// ours (see the GUI's DisableApplied fallback).
+func Apply(s Settings) (touched bool, err error) {
 	if !backupExists() {
 		b, err := osCapture()
 		if err != nil {
-			return err
+			return false, err
 		}
 		// Never snapshot a state that only "worked" because of us: a leftover
 		// entry pointing at our own address, or at a dead loopback proxy, is
@@ -151,10 +158,10 @@ func Apply(s Settings) error {
 		b.OS = runtime.GOOS
 		b.AppliedProxy = net.JoinHostPort(s.Host, strconv.Itoa(s.Port))
 		if err := writeBackup(b); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return osApply(s)
+	return true, osApply(s)
 }
 
 // Restore puts the OS proxy back to the snapshot taken by Apply and removes the

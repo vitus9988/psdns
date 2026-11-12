@@ -53,7 +53,7 @@ func TestWindowsApplyRestoreFromClean(t *testing.T) {
 	useScratchKey(t)
 
 	s := Settings{Host: "127.0.0.1", Port: 8080, Bypass: DefaultBypass()}
-	if err := Apply(s); err != nil {
+	if _, err := Apply(s); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	enable, ok, server, serverOK := readValues(t)
@@ -91,7 +91,7 @@ func TestWindowsRestoreKeepsPreexistingProxy(t *testing.T) {
 		t.Fatalf("seed ProxyServer: %v", err)
 	}
 
-	if err := Apply(Settings{Host: "127.0.0.1", Port: 8080}); err != nil {
+	if _, err := Apply(Settings{Host: "127.0.0.1", Port: 8080}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if _, err := Restore(); err != nil {
@@ -108,7 +108,7 @@ func TestWindowsRestoreKeepsPreexistingProxy(t *testing.T) {
 func TestWindowsDisableApplied(t *testing.T) {
 	redirectConfigDir(t)
 	useScratchKey(t)
-	if err := Apply(Settings{Host: "127.0.0.1", Port: 8080}); err != nil {
+	if _, err := Apply(Settings{Host: "127.0.0.1", Port: 8080}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if err := DisableApplied(); err != nil {
