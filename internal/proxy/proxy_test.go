@@ -82,7 +82,7 @@ func (u *recordingUpstream) serve() {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	// Send greeting first so the client (proxy relay) has something to forward
 	// back regardless of read timing.
 	_, _ = conn.Write(u.greeting)
@@ -181,7 +181,7 @@ func startSOCKS(t *testing.T, res *resolver.Resolver) string {
 	sp := proxy.NewSOCKS(res, cfg)
 	go func() { _ = sp.ListenAndServe() }()
 	t.Cleanup(func() { _ = sp.Close() })
-	waitListen(t, addr).Close()
+	_ = waitListen(t, addr).Close()
 	return addr
 }
 
@@ -194,7 +194,7 @@ func startHTTP(t *testing.T, res *resolver.Resolver) string {
 	hp := proxy.NewHTTP(res, cfg)
 	go func() { _ = hp.ListenAndServe() }()
 	t.Cleanup(func() { _ = hp.Close() })
-	waitListen(t, addr).Close()
+	_ = waitListen(t, addr).Close()
 	return addr
 }
 
@@ -211,7 +211,7 @@ func TestSOCKS5EndToEnd(t *testing.T) {
 	addr := startSOCKS(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
 	// Greeting: VER=5, NMETHODS=1, METHOD=0 (no auth).
@@ -278,7 +278,7 @@ func TestHTTPConnectEndToEnd(t *testing.T) {
 	addr := startHTTP(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
 	target := net.JoinHostPort(sni, upstream.port())
@@ -322,7 +322,7 @@ func TestHTTPPlainForward(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen upstream: %v", err)
 	}
-	defer upLn.Close()
+	defer func() { _ = upLn.Close() }()
 
 	type forwarded struct {
 		reqURI   string
@@ -335,7 +335,7 @@ func TestHTTPPlainForward(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		r, err := http.ReadRequest(bufio.NewReader(conn))
 		if err != nil {
 			return
@@ -345,7 +345,7 @@ func TestHTTPPlainForward(t *testing.T) {
 			hasProxy: r.Header.Get("Proxy-Connection") != "",
 			hostHdr:  r.Host,
 		}
-		fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
+		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
 	}()
 
 	_, upPort, _ := net.SplitHostPort(upLn.Addr().String())
@@ -353,11 +353,11 @@ func TestHTTPPlainForward(t *testing.T) {
 	addr := startHTTP(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
 	target := "blocked.example.com:" + upPort
-	fmt.Fprintf(conn, "GET http://%s/path?x=1 HTTP/1.1\r\nHost: %s\r\nProxy-Connection: keep-alive\r\n\r\n", target, target)
+	_, _ = fmt.Fprintf(conn, "GET http://%s/path?x=1 HTTP/1.1\r\nHost: %s\r\nProxy-Connection: keep-alive\r\n\r\n", target, target)
 
 	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
 	if err != nil {
@@ -394,7 +394,7 @@ func TestSOCKS5UnsupportedCommand(t *testing.T) {
 	addr := startSOCKS(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
@@ -442,7 +442,7 @@ func TestSOCKS5DialFailure(t *testing.T) {
 	addr := startSOCKS(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
@@ -475,7 +475,7 @@ func TestSOCKS5BadVersion(t *testing.T) {
 	addr := startSOCKS(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 
 	// SOCKS4 version byte (0x04) is rejected by the SOCKS5 handler.
@@ -496,7 +496,7 @@ func TestHTTPMalformedRequest(t *testing.T) {
 	addr := startHTTP(t, res)
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 
 	// Garbage that http.ReadRequest cannot parse -> handler closes silently.
@@ -579,6 +579,78 @@ func pickPort(t *testing.T) string {
 	return addr
 }
 
+// TestHTTPPlainWebSocketUpgrade verifies that a plaintext HTTP Upgrade (ws://)
+// request is tunnelled: handlePlain forwards the request, relays the upstream's
+// 101 Switching Protocols reply, then splices bytes both ways instead of closing
+// after a single response. Before the fix it read one response and closed the
+// upstream, breaking the WebSocket.
+func TestHTTPPlainWebSocketUpgrade(t *testing.T) {
+	// Upstream that completes the handshake (101) then echoes frames back.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		ubr := bufio.NewReader(conn)
+		if _, err := http.ReadRequest(ubr); err != nil {
+			return
+		}
+		_, _ = io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_, _ = io.Copy(conn, ubr) // echo everything sent over the upgraded tunnel
+	}()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	res := mockResolver(t, "127.0.0.1")
+	addr := startHTTP(t, res)
+
+	conn := waitListen(t, addr)
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
+
+	// Send a plaintext WebSocket upgrade request in proxy (absolute-URI) form.
+	target := net.JoinHostPort("127.0.0.1", port)
+	_, _ = fmt.Fprintf(conn,
+		"GET http://%s/chat HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+		target, target)
+
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	if !bytes.Contains([]byte(statusLine), []byte(" 101 ")) {
+		t.Fatalf("status line = %q, want 101 Switching Protocols", statusLine)
+	}
+	for { // consume the rest of the response headers up to the blank line
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read headers: %v", err)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	// The tunnel is now raw: bytes sent after the upgrade must echo back.
+	const frame = "ping-frame-0123456789"
+	if _, err := io.WriteString(conn, frame); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+	got := make([]byte, len(frame))
+	if _, err := io.ReadFull(br, got); err != nil {
+		t.Fatalf("read echoed frame: %v", err)
+	}
+	if string(got) != frame {
+		t.Fatalf("echoed frame = %q, want %q", got, frame)
+	}
+}
+
 // TestCloseTearsDownActiveTunnel is the regression test for the "HTTP/2 protocol
 // error" seen after shutdown: Close() must shut down a live CONNECT tunnel (a
 // clean FIN to the client) instead of leaving it for the dying process to reset.
@@ -595,15 +667,15 @@ func TestCloseTearsDownActiveTunnel(t *testing.T) {
 	cfg := testConfig(addr, "127.0.0.1:0")
 	hp := proxy.NewHTTP(res, cfg)
 	go func() { _ = hp.ListenAndServe() }()
-	waitListen(t, addr).Close()
+	_ = waitListen(t, addr).Close()
 
 	conn := waitListen(t, addr)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
 
 	// Open a CONNECT tunnel and confirm it is live (greeting relays back).
 	target := net.JoinHostPort(sni, upstream.port())
-	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	_, _ = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
 	if err != nil {
@@ -671,7 +743,7 @@ func TestCloseDrainsPromptlyWithActiveTunnels(t *testing.T) {
 	cfg := testConfig(addr, "127.0.0.1:0")
 	hp := proxy.NewHTTP(res, cfg)
 	go func() { _ = hp.ListenAndServe() }()
-	waitListen(t, addr).Close()
+	_ = waitListen(t, addr).Close()
 
 	var conns []net.Conn
 	for i := 0; i < 5; i++ {
@@ -679,7 +751,7 @@ func TestCloseDrainsPromptlyWithActiveTunnels(t *testing.T) {
 		conns = append(conns, c)
 		_ = c.SetDeadline(time.Now().Add(4 * time.Second))
 		target := net.JoinHostPort("h", upstream.port())
-		fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+		_, _ = fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 		_, _ = http.ReadResponse(bufio.NewReader(c), &http.Request{Method: http.MethodConnect})
 	}
 	defer func() {

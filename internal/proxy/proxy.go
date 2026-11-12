@@ -21,6 +21,10 @@ import (
 // maxTLSRecord is the maximum TLS plaintext fragment length (RFC 8446 §5.1).
 const maxTLSRecord = 16384
 
+// minDialTimeout floors the per-IP dial budget so that, with many resolved
+// addresses, no single attempt is starved into an instant failure.
+const minDialTimeout = 2 * time.Second
+
 // drainTimeout bounds how long Close waits for active connection handlers to
 // return after their client conns have been closed. Closing a client conn wakes
 // the relay io.Copy almost immediately, so this is only a safety net against a
@@ -35,9 +39,21 @@ func dialUpstream(ctx context.Context, res *resolver.Resolver, host, port string
 	if err != nil {
 		return nil, err
 	}
-	d := &net.Dialer{Timeout: timeout}
+	// Give each candidate its own slice of the overall timeout. Otherwise a
+	// single unreachable address — classically an AAAA record on a host with
+	// broken IPv6 — could burn the entire budget on one dial before the next
+	// candidate is even tried. DialContext already caps each attempt at the
+	// earlier of this Dialer.Timeout and any deadline on ctx.
+	per := timeout / time.Duration(len(ips))
+	if per < minDialTimeout {
+		per = minDialTimeout
+	}
+	if per > timeout {
+		per = timeout // never let one attempt exceed the overall budget
+	}
 	var lastErr error
 	for _, ip := range ips {
+		d := &net.Dialer{Timeout: per}
 		conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
 		if err == nil {
 			if tc, ok := conn.(*net.TCPConn); ok {
@@ -75,8 +91,42 @@ func relay(clientRead io.Reader, client, upstream net.Conn, cfg config.Config) {
 			}
 		}
 		if rerr != nil {
-			return
+			// A read-deadline timeout only means the client stayed silent while we
+			// waited for a ClientHello — e.g. a server-speaks-first protocol
+			// (SMTP/IMAP/SSH) tunneled over CONNECT, where the client sends nothing
+			// until it sees the server's greeting. That is not fatal: drop the
+			// fragmentation attempt and relay the rest verbatim so the tunnel
+			// survives. Any other error (EOF, closed conn) ends the relay.
+			var ne net.Error
+			if !errors.As(rerr, &ne) || !ne.Timeout() {
+				return
+			}
 		}
+		if _, err := io.Copy(upstream, clientRead); err != nil {
+			logRelayErr("client->upstream", err)
+		}
+	}()
+
+	if _, err := io.Copy(client, upstream); err != nil {
+		logRelayErr("upstream->client", err)
+	}
+	closeBoth()
+}
+
+// tunnelPlain splices a plaintext client connection to its upstream in both
+// directions until either side closes, without touching the byte stream. It
+// backs plaintext HTTP Upgrade (e.g. a ws:// WebSocket handshake): once the
+// client asks to switch protocols the connection stops being request/response
+// pairs and becomes a raw tunnel carrying the 101 reply and all framed bytes.
+// Unlike relay it does no ClientHello fragmentation — plaintext carries no TLS.
+// clientRead is the buffered client reader (it may already hold pipelined bytes);
+// client is the raw conn used for the upstream→client direction and for closing.
+func tunnelPlain(clientRead io.Reader, client, upstream net.Conn) {
+	var once sync.Once
+	closeBoth := func() { once.Do(func() { _ = client.Close(); _ = upstream.Close() }) }
+
+	go func() {
+		defer closeBoth()
 		if _, err := io.Copy(upstream, clientRead); err != nil {
 			logRelayErr("client->upstream", err)
 		}
@@ -116,6 +166,68 @@ func readFirstRecord(r io.Reader) ([]byte, error) {
 	body := make([]byte, recLen)
 	n, err := io.ReadFull(r, body)
 	return append(hdr, body[:n]...), err
+}
+
+// server is the listener lifecycle shared by HTTPProxy and SOCKSProxy: it adopts
+// a listener in Serve, accepts connections into the connTracker, and tears
+// everything down gracefully in Close. Only the per-connection handling differs
+// between the two proxies, supplied as onConn. Embed it and set onConn in the
+// constructor. Every method is safe for concurrent use.
+type server struct {
+	mu     sync.Mutex
+	ln     net.Listener
+	closed bool
+	track  connTracker
+	onConn func(net.Conn) // per-protocol handler for one accepted connection
+}
+
+// Serve accepts connections on ln until it is closed via Close. Serve adopts ln
+// (Close shuts it down) and is safe to call Close before or concurrently with
+// Serve. The GUI supervisor uses Serve directly so it can bind with port
+// fallback and report the actual bound address.
+func (s *server) Serve(ln net.Listener) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = ln.Close()
+		return net.ErrClosed
+	}
+	s.ln = ln
+	s.mu.Unlock()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return err
+		}
+		if !s.track.add(conn) { // Close is already running: don't serve a doomed conn
+			_ = conn.Close()
+			continue
+		}
+		go func() {
+			defer s.track.remove(conn)
+			s.onConn(conn)
+		}()
+	}
+}
+
+// Close stops the listener and shuts down every live connection so in-flight
+// tunnels end with a clean FIN instead of dying abruptly with the process
+// (which breaks a browser's HTTP/2 session carried over the tunnel). It is safe
+// to call concurrently with (or before) Serve, and is idempotent.
+func (s *server) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	var err error
+	if s.ln != nil {
+		err = s.ln.Close()
+	}
+	s.mu.Unlock()
+
+	// Closing the client side wakes relay, whose closeBoth then closes the
+	// upstream too; drain briefly so the teardown flushes before we return.
+	s.track.closeAll()
+	s.track.wait(drainTimeout)
+	return err
 }
 
 // connTracker tracks live client connections so a closing proxy can shut them

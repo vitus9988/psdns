@@ -52,9 +52,78 @@ jobs:
       - name: go vet (excluding GUI cgo packages)
         shell: bash
         run: go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+      # Type-check sources AND tests for the other release OSes without running
+      # them. Catches unix-only symbols in test files (e.g. syscall.Kill) here on
+      # the test branch, instead of at tag time in release.yml's Windows job.
+      - name: go vet cross-OS (windows/darwin, excluding GUI cgo packages)
+        shell: bash
+        run: |
+          pkgs=$(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+          for goos in windows darwin; do
+            echo "== GOOS=${goos}"
+            GOOS="${goos}" go vet $pkgs
+          done
+      - name: golangci-lint (excluding GUI cgo packages)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12
+          args: ./cmd/psdns ./internal/config ./internal/dnssrv ./internal/doh ./internal/frag ./internal/proxy ./internal/relaunch ./internal/resolver ./internal/selfupdate ./internal/supervisor ./internal/sysproxy ./internal/uiconfig
       - name: go test -race + coverage (excluding GUI cgo packages)
         shell: bash
         run: |
           pkgs=$(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
           go test -race -covermode=atomic -coverprofile=coverage.out $pkgs
           go tool cover -func=coverage.out | tail -1
+      - name: Coverage threshold gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Current coverage is ~92% on macOS, ~89-90% here on Linux and 84.8% on
+          # the Windows release runner (measured at v0.9.0-rc.11) — the gap is the
+          # OS-specific sysproxy file (sysproxy_linux.go / _windows.go) that is
+          # compiled but not yet exercised (only the pure parsers in format.go
+          # are), plus the apply tests skipped on Windows. The 84% floor sits just
+          # below that lowest matrix OS so it catches a real regression without a
+          # false failure from the per-OS gap (release.yml runs the same gate on
+          # every matrix OS — keep the two floors in lockstep). Raise toward 90%
+          # once the Windows/Linux sysproxy paths get OS-gated tests.
+          min=84.0
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub(/%/,"",$NF); print $NF}')
+          echo "total coverage=${total}%  floor=${min}%"
+          if awk "BEGIN{exit !(${total} < ${min})}"; then
+            echo "::error::coverage ${total}% is below the ${min}% floor"
+            exit 1
+          fi
+
+  # The GUI cgo packages are excluded from the checks job above (they need a
+  # native toolchain), so vet/test them here on macOS and Windows — where the
+  # tray (systray) and webview (Wails) native deps ship with the OS, needing no
+  # apt install. Linux GUI needs libgtk/libwebkit2gtk/libayatana-appindicator3
+  # and is validated at release time by release.yml's build-gui job instead.
+  gui:
+    name: gui vet + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet (GUI cgo packages)
+        shell: bash
+        run: go vet ./internal/gui/... ./cmd/psdns-gui/...
+      - name: go test -race (GUI cgo packages)
+        shell: bash
+        run: go test -race ./internal/gui/... ./cmd/psdns-gui/...
+      # Mirror release.yml's per-OS test step for the non-GUI packages too.
+      # Cross-OS `go vet` in the checks job only type-checks; runtime-only
+      # Windows failures (path separators, exec bits, missing /usr/bin tools)
+      # otherwise surface for the first time at tag push, burning an rc tag
+      # per attempt (v0.9.0-rc.6/7/10).
+      - name: go test -race (non-GUI packages, release-gate mirror)
+        shell: bash
+        run: go test -race $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')

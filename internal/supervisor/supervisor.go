@@ -6,6 +6,7 @@
 package supervisor
 
 import (
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -38,12 +39,24 @@ type State struct {
 // Supervisor owns the current config and the running server set. Every method is
 // safe for concurrent use.
 type Supervisor struct {
+	// opMu serializes whole Start/Stop operations, so a Start can never begin
+	// while a Stop is still waiting for the previous run's serve goroutines to
+	// release their sockets — otherwise the new run would race the old one for
+	// the same port (visible as a spurious "port already in use" on a quick
+	// stop/start, worst on the DNS port, which has no fallback). It is always
+	// taken before mu; serve goroutines take only mu, so there is no inversion.
+	opMu sync.Mutex
+
 	mu       sync.Mutex
 	cfg      config.Config
 	mode     Mode
 	running  bool
 	stopping bool // set by Stop so serve goroutines treat their return as clean
 	started  time.Time
+	// serveWG tracks this run's serve goroutines from the moment they are
+	// created (not from when they start serving), which is what lets Stop wait
+	// out one that has not even bound its socket yet.
+	serveWG *sync.WaitGroup
 
 	// Underlying servers are one-shot (their listeners cannot be reopened after
 	// Close/Shutdown), so a fresh set is allocated on every Start.
@@ -66,6 +79,8 @@ func New(cfg config.Config) *Supervisor {
 // asynchronously via Status().Listeners[i].Err. Use WaitSettled to give them a
 // moment to appear.
 func (s *Supervisor) Start(mode Mode) error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.running {
@@ -75,14 +90,19 @@ func (s *Supervisor) Start(mode Mode) error {
 		return ErrInvalidMode
 	}
 
-	client, err := doh.New(s.cfg.DoHURL, s.cfg.DoHBootstrap, s.cfg.Timeout)
+	client, err := doh.NewExchanger(s.cfg.DoHURL, s.cfg.DoHBootstrap, s.cfg.DoHFallbacks, s.cfg.Timeout, s.cfg.DoHHedgeDelay)
 	if err != nil {
 		return err // bad endpoint URL — a config error worth showing inline
 	}
 
 	s.listeners = map[string]*Listener{}
 	s.stopping = false
+	// A fresh WaitGroup per run: Stop waits on the one belonging to the run it
+	// tears down, so it can never be advanced by a later run's goroutines.
+	wg := &sync.WaitGroup{}
+	s.serveWG = wg
 	res := resolver.New(client)
+	res.Fallback = resolver.SystemLookup
 
 	// start records a fresh listener and runs its blocking serve loop in a
 	// goroutine, capturing the bind/serve error when it returns. Used for the DNS
@@ -90,7 +110,9 @@ func (s *Supervisor) Start(mode Mode) error {
 	start := func(kind, addr string, serve func() error) {
 		l := &Listener{Kind: kind, Addr: addr, Up: true}
 		s.listeners[kind] = l
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			serr := serve() // blocks until Close/Shutdown or a bind failure
 			s.mu.Lock()
 			l.Up = false
@@ -116,7 +138,9 @@ func (s *Supervisor) Start(mode Mode) error {
 		l.Addr = ln.Addr().String()
 		l.Up = true
 		l.Fallback = fellBack(addr, l.Addr)
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			serr := p.Serve(ln)
 			s.mu.Lock()
 			l.Up = false
@@ -151,12 +175,22 @@ func (s *Supervisor) Start(mode Mode) error {
 	return nil
 }
 
-// Stop tears down all running servers. The instances are discarded; the next
-// Start allocates fresh ones.
+// Stop tears down all running servers and does not return until their serve
+// goroutines have exited, so every port is actually free by then. The instances
+// are discarded; the next Start allocates fresh ones.
+//
+// The wait matters because teardown only *asks* the servers to stop: a goroutine
+// that had not yet reached its bind can still open the socket afterwards (it then
+// sees the closed flag and releases it), and a Start racing that window would
+// collide with the run it is replacing — a spurious "port already in use",
+// unrecoverable on the DNS port, which has no fallback. opMu holds off any Start
+// until this wait completes.
 func (s *Supervisor) Stop() error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.running {
+		s.mu.Unlock()
 		return ErrNotRunning
 	}
 	s.stopping = true
@@ -167,11 +201,26 @@ func (s *Supervisor) Stop() error {
 		_ = s.sock.Close()
 	}
 	if s.dns != nil {
-		s.dns.Shutdown()
+		if err := s.dns.Shutdown(); err != nil {
+			log.Printf("supervisor: dns shutdown: %v", err)
+		}
 	}
 	s.http, s.sock, s.dns = nil, nil, nil
+	// Drop the stale listener snapshot so Status stops reporting the (now
+	// Up:false) listeners of the run that just ended; the next Start allocates a
+	// fresh set. A serve goroutine still unwinding may set Up=false on its own
+	// *Listener after this, but that pointer is now orphaned so the write is
+	// harmless (and still guarded by s.mu).
+	s.listeners = map[string]*Listener{}
 	s.running = false
 	s.mode = ""
+	wg := s.serveWG
+	s.serveWG = nil
+	// Release mu before waiting: the goroutines take it on their way out.
+	s.mu.Unlock()
+	if wg != nil {
+		wg.Wait()
+	}
 	return nil
 }
 

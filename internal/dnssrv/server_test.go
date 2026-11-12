@@ -68,7 +68,7 @@ func TestServerRoundTrip(t *testing.T) {
 	srv := dnssrv.New(newMockDoH(t, want), addr, 5*time.Second)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
-	t.Cleanup(srv.Shutdown)
+	t.Cleanup(func() { _ = srv.Shutdown() })
 
 	for _, proto := range []string{"udp", "tcp"} {
 		t.Run(proto, func(t *testing.T) {
@@ -116,7 +116,7 @@ func TestListenAndServeReleasesUDPOnTCPBindError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen tcp: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	addr := ln.Addr().String()
 
 	dohClient, err := doh.New("https://1.1.1.1/dns-query", "", time.Second)
@@ -126,7 +126,7 @@ func TestListenAndServeReleasesUDPOnTCPBindError(t *testing.T) {
 	srv := dnssrv.New(dohClient, addr, time.Second)
 
 	if err := srv.ListenAndServe(); err == nil {
-		srv.Shutdown()
+		_ = srv.Shutdown()
 		t.Fatal("expected TCP bind error, got nil")
 	}
 	// The UDP socket bound first must have been closed when the TCP bind failed.

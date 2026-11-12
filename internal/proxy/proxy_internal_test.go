@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vitus9988/psdns/internal/config"
 )
 
 // tlsRecord builds a TLS handshake record (content type 0x16) whose 2-byte
@@ -197,8 +199,12 @@ func TestHostPortFromRequest(t *testing.T) {
 	}{
 		{"absolute with port", "http://example.com:8080/p", "", "example.com", "8080"},
 		{"absolute no port defaults 80", "http://example.com/p", "", "example.com", "80"},
+		{"absolute bracketed IPv6 defaults 80", "http://[::1]/p", "", "::1", "80"},
+		{"absolute bracketed IPv6 with port", "http://[::1]:8080/p", "", "::1", "8080"},
 		{"origin form uses host header", "/p", "example.com", "example.com", "80"},
 		{"host header with port", "/p", "example.com:8443", "example.com", "8443"},
+		{"host header bracketed IPv6", "/p", "[::1]", "::1", "80"},
+		{"host header bracketed IPv6 with port", "/p", "[::1]:8080", "::1", "8080"},
 		{"no host anywhere", "/p", "", "", ""},
 	}
 	for _, tc := range cases {
@@ -213,6 +219,28 @@ func TestHostPortFromRequest(t *testing.T) {
 				t.Fatalf("hostPortFromRequest = %q,%q want %q,%q", host, port, tc.wantHost, tc.wantPort)
 			}
 		})
+	}
+}
+
+func TestSplitHostPortDefault(t *testing.T) {
+	cases := []struct {
+		hostport           string
+		defaultPort        string
+		wantHost, wantPort string
+	}{
+		{"example.com:443", "80", "example.com", "443"},
+		{"example.com", "80", "example.com", "80"},
+		{"[::1]:443", "80", "::1", "443"},
+		{"[::1]", "80", "::1", "80"},
+		{"::1", "80", "::1", "80"},
+		{"", "80", "", ""},
+	}
+	for _, tc := range cases {
+		host, port := splitHostPortDefault(tc.hostport, tc.defaultPort)
+		if host != tc.wantHost || port != tc.wantPort {
+			t.Errorf("splitHostPortDefault(%q,%q) = %q,%q want %q,%q",
+				tc.hostport, tc.defaultPort, host, port, tc.wantHost, tc.wantPort)
+		}
 	}
 }
 
@@ -237,8 +265,8 @@ func TestReadAddrTruncated(t *testing.T) {
 func TestConnTrackerAddAfterCloseRejected(t *testing.T) {
 	var tr connTracker
 	c1, peer1 := net.Pipe()
-	defer c1.Close()
-	defer peer1.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = peer1.Close() }()
 	if !tr.add(c1) {
 		t.Fatal("add on a fresh tracker should succeed")
 	}
@@ -257,8 +285,8 @@ func TestConnTrackerAddAfterCloseRejected(t *testing.T) {
 	}
 
 	c2, peer2 := net.Pipe()
-	defer c2.Close()
-	defer peer2.Close()
+	defer func() { _ = c2.Close() }()
+	defer func() { _ = peer2.Close() }()
 	if tr.add(c2) {
 		t.Fatal("add after closeAll must be rejected")
 	}
@@ -280,13 +308,81 @@ func TestConnTrackerCloseAllIdempotent(t *testing.T) {
 	}
 }
 
+// FuzzReadFirstRecord throws arbitrary and truncated TLS-record-shaped bytes at
+// readFirstRecord. It must never panic and must never claim to have read more
+// bytes than the input held (the caller forwards exactly what it returns).
+func FuzzReadFirstRecord(f *testing.F) {
+	f.Add([]byte{0x16, 0x03, 0x01, 0x00, 0x02, 0xAB, 0xCD})
+	f.Add([]byte{0x16, 0x03, 0x01, 0xFF, 0xFF})
+	f.Add([]byte("GET / HTTP/1.1\r\n"))
+	f.Add([]byte{0x16, 0x03})
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		data, _ := readFirstRecord(bufio.NewReader(bytes.NewReader(b)))
+		if len(data) > len(b) {
+			t.Fatalf("returned %d bytes from a %d-byte input", len(data), len(b))
+		}
+	})
+}
+
+// TestRelayServerSpeaksFirstSurvivesQuietClient guards the fix for a
+// server-speaks-first protocol tunneled over CONNECT (SMTP/IMAP/SSH): the client
+// legitimately sends nothing until it sees the server greeting, so the
+// first-record read deadline fires with no ClientHello. The relay must NOT tear
+// the tunnel down on that timeout — it must deliver the server greeting and
+// forward the client's later bytes verbatim.
+func TestRelayServerSpeaksFirstSurvivesQuietClient(t *testing.T) {
+	proxyClient, extClient := net.Pipe()
+	proxyUp, extUp := net.Pipe()
+	defer func() { _ = extClient.Close() }()
+	defer func() { _ = extUp.Close() }()
+
+	cfg := config.Default()
+	cfg.Frag = config.FragNone
+	cfg.Timeout = 150 * time.Millisecond
+
+	go relay(proxyClient, proxyClient, proxyUp, cfg)
+
+	// The upstream (server) speaks first, before the client sends anything.
+	greeting := []byte("220 mail.example ESMTP\r\n")
+	go func() { _, _ = extUp.Write(greeting) }()
+
+	buf := make([]byte, len(greeting))
+	_ = extClient.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(extClient, buf); err != nil {
+		t.Fatalf("client did not receive server greeting: %v", err)
+	}
+	if !bytes.Equal(buf, greeting) {
+		t.Fatalf("greeting mismatch: %q", buf)
+	}
+
+	// Wait past the first-record read deadline, then the previously-silent client
+	// sends a command. Before the fix the relay would already have closed both
+	// conns, so this would never reach the upstream.
+	time.Sleep(cfg.Timeout + 100*time.Millisecond)
+	cmd := []byte("EHLO example\r\n")
+	go func() {
+		_ = extClient.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_, _ = extClient.Write(cmd)
+	}()
+
+	got := make([]byte, len(cmd))
+	_ = extUp.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(extUp, got); err != nil {
+		t.Fatalf("upstream did not receive client command after quiet period (tunnel torn down?): %v", err)
+	}
+	if !bytes.Equal(got, cmd) {
+		t.Fatalf("command mismatch: %q", got)
+	}
+}
+
 // TestConnTrackerWaitTimesOutWhileHandlerOutstanding verifies wait is bounded:
 // while a handler is still registered it times out, then drains after remove.
 func TestConnTrackerWaitTimesOutWhileHandlerOutstanding(t *testing.T) {
 	var tr connTracker
 	c, peer := net.Pipe()
-	defer c.Close()
-	defer peer.Close()
+	defer func() { _ = c.Close() }()
+	defer func() { _ = peer.Close() }()
 	if !tr.add(c) {
 		t.Fatal("add should succeed")
 	}

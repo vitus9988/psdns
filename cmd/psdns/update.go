@@ -17,6 +17,10 @@ import (
 // CLI, as opposed to the GUI's "psdns-gui". See internal/selfupdate.Checker.Binary.
 const cliBinary = "psdns"
 
+// apiBase overrides the GitHub API endpoint in tests; empty means the
+// production default (Checker falls back to api.github.com).
+var apiBase string
+
 // runUpdate implements `psdns update`: it checks GitHub Releases for a newer
 // build and, unless -check is given, downloads it, verifies the published
 // SHA-256 checksum, and atomically replaces the running executable. The CLI does
@@ -30,6 +34,9 @@ func runUpdate(args []string) {
 
 	ck := selfupdate.NewChecker(&http.Client{Timeout: *timeout})
 	ck.Binary = cliBinary
+	if apiBase != "" {
+		ck.APIBase = apiBase
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -124,6 +131,9 @@ func notifyUpdate() {
 	defer cancel()
 	ck := selfupdate.NewChecker(&http.Client{Timeout: 5 * time.Second})
 	ck.Binary = cliBinary
+	if apiBase != "" {
+		ck.APIBase = apiBase
+	}
 	res, err := ck.Check(ctx, false)
 	if err != nil || !res.Newer {
 		return

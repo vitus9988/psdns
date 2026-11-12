@@ -17,6 +17,7 @@ func TestDefault(t *testing.T) {
 	}{
 		{"DoHURL", c.DoHURL, "https://1.1.1.1/dns-query"},
 		{"DoHBootstrap", c.DoHBootstrap, ""},
+		{"DoHHedgeDelay", c.DoHHedgeDelay, 250 * time.Millisecond},
 		{"DNSListen", c.DNSListen, "127.0.0.1:53"},
 		{"ProxyListen", c.ProxyListen, "127.0.0.1:8080"},
 		{"SocksListen", c.SocksListen, "127.0.0.1:1080"},
@@ -31,6 +32,9 @@ func TestDefault(t *testing.T) {
 				t.Fatalf("Default().%s = %v, want %v", tt.name, tt.got, tt.want)
 			}
 		})
+	}
+	if len(c.DoHFallbacks) != 0 {
+		t.Fatalf("Default().DoHFallbacks = %v, want empty", c.DoHFallbacks)
 	}
 }
 
@@ -49,5 +53,52 @@ func TestFragStrategyConstants(t *testing.T) {
 		if string(tt.strat) != tt.want {
 			t.Errorf("strategy %v = %q, want %q", tt.strat, string(tt.strat), tt.want)
 		}
+	}
+}
+
+func TestValidateBootstrap(t *testing.T) {
+	valid := []string{
+		"",
+		"1.1.1.1",
+		"1.1.1.1:853",
+		"2606:4700:4700::1111",
+		"[2606:4700:4700::1111]:853",
+	}
+	for _, bootstrap := range valid {
+		if err := config.ValidateBootstrap(bootstrap); err != nil {
+			t.Errorf("ValidateBootstrap(%q): %v", bootstrap, err)
+		}
+	}
+
+	invalid := []string{
+		"example.com",
+		"example.com:853",
+		"1.1.1.1:bad",
+		"1.1.1.1:99999",
+		"[2606:4700:4700::1111]",
+	}
+	for _, bootstrap := range invalid {
+		if err := config.ValidateBootstrap(bootstrap); err == nil {
+			t.Errorf("ValidateBootstrap(%q): expected error", bootstrap)
+		}
+	}
+}
+
+func TestParseDoHList(t *testing.T) {
+	got := config.ParseDoHList(" https://1.1.1.1/dns-query, ,https://9.9.9.9/dns-query ")
+	want := []string{"https://1.1.1.1/dns-query", "https://9.9.9.9/dns-query"}
+	if len(got) != len(want) {
+		t.Fatalf("ParseDoHList len = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ParseDoHList[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if got := config.FormatDoHList(want); got != "https://1.1.1.1/dns-query,https://9.9.9.9/dns-query" {
+		t.Fatalf("FormatDoHList = %q", got)
+	}
+	if got := config.ParseDoHList(" , "); len(got) != 0 {
+		t.Fatalf("empty ParseDoHList = %v", got)
 	}
 }

@@ -1,6 +1,7 @@
 package dnssrv
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -120,4 +121,92 @@ func TestHandleServfailOnDoHError(t *testing.T) {
 	if rw.msg.Id != req.Id {
 		t.Fatalf("SERVFAIL Id = %#x, want %#x", rw.msg.Id, req.Id)
 	}
+}
+
+// bigAnswerExchanger answers every query with n A records regardless of the
+// question, so truncation behaviour can be exercised deterministically.
+type bigAnswerExchanger struct{ n int }
+
+func (b bigAnswerExchanger) Exchange(_ context.Context, req *dns.Msg) (*dns.Msg, error) {
+	name := "example.com."
+	if len(req.Question) > 0 {
+		name = req.Question[0].Name
+	}
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	for i := 0; i < b.n; i++ {
+		resp.Answer = append(resp.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.IPv4(203, 0, 113, byte(i)),
+		})
+	}
+	return resp, nil
+}
+
+// capRW is a fakeRW that reports a configurable transport ("udp"/"tcp") so the
+// UDP-only truncation path can be tested for both.
+type capRW struct {
+	fakeRW
+	network string
+}
+
+func (c *capRW) RemoteAddr() net.Addr {
+	if c.network == "tcp" {
+		return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999}
+	}
+	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999}
+}
+
+// TestHandleTruncatesLargeUDPAnswer verifies a DoH answer too large for the
+// client's UDP buffer is truncated with the TC bit set (so the client retries
+// over TCP, RFC 1035 §4.2.1), that a client advertising a large EDNS0 buffer
+// keeps the whole answer, and that TCP answers are never truncated.
+func TestHandleTruncatesLargeUDPAnswer(t *testing.T) {
+	const records = 100 // ~1.6 KB packed: over 512 but under 4096
+	s := New(bigAnswerExchanger{n: records}, "127.0.0.1:0", time.Second)
+
+	newReq := func(edns bool) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		if edns {
+			m.SetEdns0(4096, false)
+		}
+		return m
+	}
+
+	t.Run("udp without EDNS truncates to 512 with TC", func(t *testing.T) {
+		rw := &capRW{network: "udp"}
+		s.handle(rw, newReq(false))
+		if rw.msg == nil {
+			t.Fatal("handler wrote no message")
+		}
+		if !rw.msg.Truncated {
+			t.Fatal("oversized UDP answer must set the TC bit")
+		}
+		if l := rw.msg.Len(); l > dns.MinMsgSize {
+			t.Fatalf("truncated UDP answer len %d exceeds 512-byte default", l)
+		}
+	})
+
+	t.Run("udp with large EDNS buffer keeps full answer", func(t *testing.T) {
+		rw := &capRW{network: "udp"}
+		s.handle(rw, newReq(true))
+		if rw.msg.Truncated {
+			t.Fatal("answer within the advertised 4096-byte buffer must not be truncated")
+		}
+		if got := len(rw.msg.Answer); got != records {
+			t.Fatalf("kept %d answers, want all %d", got, records)
+		}
+	})
+
+	t.Run("tcp never truncates", func(t *testing.T) {
+		rw := &capRW{network: "tcp"}
+		s.handle(rw, newReq(false))
+		if rw.msg.Truncated {
+			t.Fatal("TCP answers must never be truncated")
+		}
+		if got := len(rw.msg.Answer); got != records {
+			t.Fatalf("kept %d answers, want all %d", got, records)
+		}
+	})
 }

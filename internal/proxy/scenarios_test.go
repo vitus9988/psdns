@@ -33,11 +33,11 @@ func TestHTTPConnectFragmentationScenarios(t *testing.T) {
 			addr := startHTTP(t, res)
 
 			conn := waitListen(t, addr)
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
 			target := net.JoinHostPort(tc.sni, upstream.port())
-			fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+			_, _ = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 
 			br := bufio.NewReader(conn)
 			resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})

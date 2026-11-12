@@ -52,9 +52,14 @@ jobs:
       - name: go vet (excluding GUI cgo packages)
         shell: bash
         run: go vet $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
-      - name: go test (excluding GUI cgo packages)
+      - name: golangci-lint (excluding GUI cgo packages)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12
+          args: ./cmd/psdns ./internal/config ./internal/dnssrv ./internal/doh ./internal/frag ./internal/proxy ./internal/relaunch ./internal/resolver ./internal/selfupdate ./internal/supervisor ./internal/sysproxy ./internal/uiconfig
+      - name: go test -race (excluding GUI cgo packages)
         shell: bash
-        run: go test $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
+        run: go test -race $(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
 
   build-gui:
     name: build ${{ matrix.label }}
@@ -100,6 +105,23 @@ jobs:
           pkgs=$(go list ./... | grep -vE '/(cmd/psdns-gui|internal/gui)$')
           go test -race -covermode=atomic -coverprofile=coverage.out $pkgs
           go tool cover -func=coverage.out | tail -1
+
+      - name: Coverage threshold gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Mirrors ci.yml's gate so a coverage regression cannot slip through a
+          # tag-triggered release that skipped the PR gate. The floor must clear
+          # the lowest matrix OS — Windows, measured 84.8% at v0.9.0-rc.11
+          # (sysproxy_windows.go untested + apply tests skipped on Windows);
+          # raise it in lockstep with ci.yml once that gap is closed.
+          min=84.0
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub(/%/,"",$NF); print $NF}')
+          echo "total coverage=${total}%  floor=${min}%"
+          if awk "BEGIN{exit !(${total} < ${min})}"; then
+            echo "::error::coverage ${total}% is below the ${min}% floor"
+            exit 1
+          fi
 
       - name: Import Apple Developer ID certificate
         if: matrix.label == 'macos' && env.MACOS_SIGN_IDENTITY != ''
@@ -160,6 +182,14 @@ jobs:
     needs: [build-gui, build-cli-arm]
     runs-on: ubuntu-latest
     steps:
+      # Checkout MUST stay before download-artifact: checkout cleans the
+      # workspace, so dist/ downloaded first would be wiped. The repo is needed
+      # for scripts/ (release-notes.sh, prune-rc.sh); fetch-depth 0 brings the
+      # full history + tags for the notes commit range.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -185,9 +215,19 @@ jobs:
           shasum -a 256 psdns_*.tar.gz psdns_*.zip > "psdns_${GITHUB_REF_NAME}_checksums.txt"
           ls -1
 
+      - name: Generate release notes (conventional commits)
+        shell: bash
+        # dist/notes.md is not published as an asset: the `files` globs below
+        # only match dist/psdns_*.
+        run: bash scripts/release-notes.sh "${GITHUB_REF_NAME}" > dist/notes.md
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # Curated body grouped by conventional-commit prefix;
+          # generate_release_notes stays on, so GitHub appends its automatic
+          # notes (compare link) after the body.
+          body_path: dist/notes.md
           generate_release_notes: true
           # Tags with a pre-release suffix (e.g. v1.2.3-rc.1) are published as a
           # GitHub pre-release. /releases/latest excludes pre-releases, so the
@@ -201,34 +241,45 @@ jobs:
 
       - name: Prune this version's rc pre-releases
         # A stable vX.Y.Z supersedes its vX.Y.Z-rc.* test pre-releases, so once
-        # the stable release is published we delete those pre-releases and their
-        # git tags — keeps the Releases page from accumulating stale rc entries.
+        # the stable release is published those pre-releases and their git tags
+        # are deleted — keeps the Releases page from accumulating stale rc
+        # entries. The two-pass delete logic (published pre-releases via
+        # `gh release delete --cleanup-tag`, then the orphan tags left behind
+        # by failed rc runs) lives in scripts/prune-rc.sh so the same code can
+        # also be run locally against an abandoned version line.
         # Runs only for a plain vX.Y.Z tag; pre-release tags contain '-' and are
         # skipped (the inverse of the prerelease flag above). Uses GITHUB_TOKEN
         # (contents: write) so it is fully automatic — no local gh auth needed.
-        # Best-effort: warnings never fail the already-published release.
+        # Best-effort: the script warns but never fails the published release.
         if: ${{ !contains(github.ref_name, '-') }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          base="${GITHUB_REF_NAME}"
-          echo "정식 ${base} 발행 — ${base}-rc.* 프리릴리즈/태그를 정리합니다."
-          if ! rcs=$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 \
-                       --json tagName \
-                       --jq ".[] | select(.tagName | startswith(\"${base}-rc.\")) | .tagName"); then
-            echo "::warning::rc 프리릴리즈 목록 조회 실패 — 정리를 건너뜁니다."
-            exit 0
-          fi
-          if [ -z "${rcs}" ]; then
-            echo "정리할 ${base}-rc.* 프리릴리즈가 없습니다."
-            exit 0
-          fi
-          echo "${rcs}" | while IFS= read -r rc; do
-            [ -n "${rc}" ] || continue
-            echo "삭제: ${rc}"
-            gh release delete "${rc}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes \
-              || echo "::warning::${rc} 삭제 실패(또는 이미 없음) — 건너뜁니다."
-          done
-          echo "✓ ${base}-rc.* 정리 완료"
+        run: bash scripts/prune-rc.sh "${GITHUB_REF_NAME}"
+
+  # Post-publish verification on real runners: download this OS's archive from
+  # the release that was just published, re-verify its checksum, and smoke-test
+  # the CLI (version match + one proxied HTTPS request). This must live INSIDE
+  # this workflow: the release is published with GITHUB_TOKEN, and events
+  # created by GITHUB_TOKEN never trigger other workflows, so a separate
+  # `on: release` verify workflow would never fire. A verify failure fails this
+  # run, which release-test.sh treats like any failed rc run (tag recovery).
+  # GUI 는 headless 로 확인 불가 — 실기기 확인은 사람 몫(README §테스트 채널).
+  verify:
+    name: verify ${{ matrix.label }}
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: linux,   os: ubuntu-latest }
+          - { label: macos,   os: macos-latest }
+          - { label: windows, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download, checksum, CLI smoke test
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/verify-release.sh "${GITHUB_REF_NAME}"

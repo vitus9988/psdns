@@ -15,10 +15,11 @@ description: psdns 정식 릴리즈 게시 — 검증된 test 브랜치를 main�
 1. **계획 미리보기(필수)** — `bash scripts/release-main.sh --dry-run` 으로 기준 rc 태그·정식 버전·동작(병합/푸시/태그)을 보여준다. 버전을 지정하려면 `bash scripts/release-main.sh --dry-run 0.7.0`.
 2. **확인(필수)** — 이 작업은 **모든 사용자에게 자동 업데이트로 배포**되는 외부 공개 작업이다. 정식 버전 번호를 사용자에게 확인받고 **명시적 동의**를 받은 뒤에만 실행한다.
 3. **실행** — `bash scripts/release-main.sh [버전]`.
-4. **보고** — 게시된 정식 릴리즈 URL을 보고한다.
+4. **보고** — 게시된 정식 릴리즈 URL을 보고한다. 스크립트가 릴리즈 런 감시(verify 잡 포함)와, 성공 시 로컬 rc 태그 정리까지 마친 상태다 — 원격 rc 는 CI 가 `scripts/prune-rc.sh` 로 자동 정리한다.
 
 ## 동작 규칙
 - 인자 없으면 가장 높은 `-rc` 태그에서 접미사를 떼어 정식 버전을 정한다(`v0.7.0-rc.3`→`v0.7.0`).
 - 스크립트는 `main` 을 origin과 맞춘 뒤 `test` 를 `--no-ff` 로 병합하고 정식 태그를 push하며, 끝으로 `test` 를 `main` 에 맞춰 다음 사이클을 준비한다.
-- **브랜치 보호로 main 직접 push가 막히면** 스크립트가 멈춘다. 그때는 GitHub에서 PR로 병합하도록 안내한다: `gh pr create --base main --head test --fill` → CI 통과 후 머지 → `main` 에서 `git pull` 후 정식 태그만 push(`git tag vX.Y.Z && git push origin vX.Y.Z`).
+- **브랜치 보호로 main 직접 push 가 거부되면 스크립트가 자동으로 PR 경로(생성→체크 대기→머지)로 폴백**한다(`--pr` 로 처음부터 PR 경로 강제 가능). gh 를 쓸 수 없을 때만 수동 PR 절차가 안내된다.
+- 태그 push 후 릴리즈 런을 감시한다. **실패해도 정식 태그는 회수하지 않는다** — 러너 등 일시 오류면 스크립트가 안내하는 `gh run rerun <run-id> --failed` 를 사용자 동의 후 실행하고, 코드 문제면 수정 → `/release-test` → 다음 정식 버전으로 재시도한다.
 - 이미 같은 정식 태그가 있으면 스크립트가 중단한다(중복 릴리즈 방지).

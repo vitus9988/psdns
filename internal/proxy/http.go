@@ -7,26 +7,27 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"sync"
+	"strings"
+	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
 	"github.com/vitus9988/psdns/internal/resolver"
 )
 
-// HTTPProxy is an HTTP CONNECT proxy (HTTPS tunnelling) with SNI-bypass.
+// HTTPProxy is an HTTP CONNECT proxy (HTTPS tunnelling) with SNI-bypass. It also
+// forwards plaintext (non-CONNECT) requests. The listener lifecycle (Serve,
+// Close) is the embedded server; only handle is HTTP-specific.
 type HTTPProxy struct {
+	server
 	res *resolver.Resolver
 	cfg config.Config
-
-	mu     sync.Mutex
-	ln     net.Listener
-	closed bool
-	track  connTracker
 }
 
 // NewHTTP creates an HTTP CONNECT proxy.
 func NewHTTP(res *resolver.Resolver, cfg config.Config) *HTTPProxy {
-	return &HTTPProxy{res: res, cfg: cfg}
+	p := &HTTPProxy{res: res, cfg: cfg}
+	p.onConn = p.handle
+	return p
 }
 
 // ListenAndServe binds cfg.ProxyListen and serves until the listener is closed.
@@ -38,56 +39,6 @@ func (p *HTTPProxy) ListenAndServe() error {
 		return err
 	}
 	return p.Serve(ln)
-}
-
-// Serve accepts connections on ln until it is closed via Close. Serve adopts ln
-// (Close shuts it down) and is safe to call Close before or concurrently with
-// Serve. The GUI supervisor uses Serve directly so it can bind with port
-// fallback and report the actual bound address.
-func (p *HTTPProxy) Serve(ln net.Listener) error {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		_ = ln.Close()
-		return net.ErrClosed
-	}
-	p.ln = ln
-	p.mu.Unlock()
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return err
-		}
-		if !p.track.add(conn) { // Close is already running: don't serve a doomed conn
-			_ = conn.Close()
-			continue
-		}
-		go func() {
-			defer p.track.remove(conn)
-			p.handle(conn)
-		}()
-	}
-}
-
-// Close stops the listener and shuts down every live connection so in-flight
-// CONNECT tunnels end with a clean FIN instead of dying abruptly with the
-// process (which breaks a browser's HTTP/2 session carried over the tunnel).
-// It is safe to call concurrently with (or before) ListenAndServe, and is
-// idempotent.
-func (p *HTTPProxy) Close() error {
-	p.mu.Lock()
-	p.closed = true
-	var err error
-	if p.ln != nil {
-		err = p.ln.Close()
-	}
-	p.mu.Unlock()
-
-	// Closing the client side wakes relay, whose closeBoth then closes the
-	// upstream too; drain briefly so the teardown flushes before we return.
-	p.track.closeAll()
-	p.track.wait(drainTimeout)
-	return err
 }
 
 func (p *HTTPProxy) handle(client net.Conn) {
@@ -110,17 +61,14 @@ func (p *HTTPProxy) handle(client net.Conn) {
 // handleConnect tunnels an HTTPS CONNECT request: dial the target over DoH,
 // reply 200, then relay bytes with the ClientHello fragmented to defeat SNI DPI.
 func (p *HTTPProxy) handleConnect(client net.Conn, br *bufio.Reader, req *http.Request) {
-	host, port, err := net.SplitHostPort(req.Host)
-	if err != nil {
-		host, port = req.Host, "443"
-	}
+	host, port := splitHostPortDefault(req.Host, "443")
 
 	ctx, cancel := context.WithTimeout(context.Background(), p.cfg.Timeout)
 	upstream, err := dialUpstream(ctx, p.res, host, port, p.cfg.Timeout)
 	cancel()
 	if err != nil {
 		log.Printf("http-proxy: dial %s failed: %v", req.Host, err)
-		fmt.Fprint(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
+		_, _ = fmt.Fprint(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		_ = client.Close()
 		return
 	}
@@ -144,7 +92,7 @@ func (p *HTTPProxy) handleConnect(client net.Conn, br *bufio.Reader, req *http.R
 // each request dials a fresh upstream because a keep-alive client may target a
 // different host per request.
 func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Request) {
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	for {
 		if req == nil {
@@ -157,7 +105,7 @@ func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Req
 
 		host, port := hostPortFromRequest(req)
 		if host == "" {
-			fmt.Fprint(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
+			_, _ = fmt.Fprint(client, "HTTP/1.1 400 Bad Request\r\n\r\n")
 			return
 		}
 
@@ -166,7 +114,7 @@ func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Req
 		cancel()
 		if derr != nil {
 			log.Printf("http-proxy: dial %s failed: %v", req.Host, derr)
-			fmt.Fprint(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
+			_, _ = fmt.Fprint(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 			return
 		}
 
@@ -178,17 +126,48 @@ func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Req
 		req.Header.Del("Proxy-Connection")
 		req.Header.Del("Proxy-Authorization")
 
-		if werr := req.Write(upstream); werr != nil {
+		// A protocol upgrade (e.g. a plain ws:// WebSocket) stops being
+		// request/response after this exchange: forward the request, then splice
+		// both connections so the 101 reply and all framed bytes flow both ways.
+		// Without this the handler would read one response and close the upstream,
+		// killing the WebSocket.
+		if isUpgradeRequest(req) {
+			_ = upstream.SetWriteDeadline(time.Now().Add(p.cfg.Timeout))
+			werr := req.Write(upstream)
+			_ = upstream.SetWriteDeadline(time.Time{})
+			if werr != nil {
+				_ = upstream.Close()
+				return
+			}
+			tunnelPlain(br, client, upstream)
+			return
+		}
+
+		// Bound the response-header read so a connected but silent origin cannot
+		// hang the handler indefinitely (cleared before copying the body so a
+		// slow or streaming response is not truncated). The request write is only
+		// deadline-bounded when there is no body to send — a small, buffered
+		// header exchange. A request that carries a body (an upload) must not be
+		// bounded by the fixed timeout, or req.Write, which streams the body
+		// inline, would abort a legitimately large or slow upload partway through.
+		if req.ContentLength == 0 {
+			_ = upstream.SetWriteDeadline(time.Now().Add(p.cfg.Timeout))
+		}
+		werr := req.Write(upstream)
+		_ = upstream.SetWriteDeadline(time.Time{})
+		if werr != nil {
 			_ = upstream.Close()
 			return
 		}
 
+		_ = upstream.SetReadDeadline(time.Now().Add(p.cfg.Timeout))
 		resp, rerr := http.ReadResponse(bufio.NewReader(upstream), req)
+		_ = upstream.SetReadDeadline(time.Time{})
 		if rerr != nil {
 			_ = upstream.Close()
 			return
 		}
-		werr := resp.Write(client)
+		werr = resp.Write(client)
 		_ = resp.Body.Close()
 		_ = upstream.Close()
 		if werr != nil {
@@ -203,6 +182,24 @@ func (p *HTTPProxy) handlePlain(client net.Conn, br *bufio.Reader, req *http.Req
 	}
 }
 
+// isUpgradeRequest reports whether req asks to switch protocols (e.g. a plain
+// WebSocket handshake): it carries an Upgrade header named by a "Connection:
+// Upgrade" token. Such a request is tunnelled raw rather than forwarded as a
+// single request/response pair.
+func isUpgradeRequest(req *http.Request) bool {
+	if req.Header.Get("Upgrade") == "" {
+		return false
+	}
+	for _, v := range req.Header.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hostPortFromRequest extracts the target host and port from a plaintext proxy
 // request, defaulting to port 80. Proxy requests normally carry an absolute URL
 // (req.URL.Host); an origin-form request falls back to the Host header.
@@ -214,8 +211,24 @@ func hostPortFromRequest(req *http.Request) (host, port string) {
 	if hostport == "" {
 		return "", ""
 	}
+	return splitHostPortDefault(hostport, "80")
+}
+
+func splitHostPortDefault(hostport, defaultPort string) (host, port string) {
+	if hostport == "" {
+		return "", ""
+	}
 	if h, p, err := net.SplitHostPort(hostport); err == nil {
 		return h, p
 	}
-	return hostport, "80"
+	if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
+		unbracketed := strings.TrimSuffix(strings.TrimPrefix(hostport, "["), "]")
+		if net.ParseIP(unbracketed) != nil {
+			return unbracketed, defaultPort
+		}
+	}
+	if net.ParseIP(hostport) != nil {
+		return hostport, defaultPort
+	}
+	return hostport, defaultPort
 }

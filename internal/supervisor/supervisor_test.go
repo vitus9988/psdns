@@ -57,7 +57,7 @@ func TestStartTwiceRejected(t *testing.T) {
 	if err := sup.Start(ModeProxy); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer sup.Stop()
+	defer func() { _ = sup.Stop() }()
 	if err := sup.Start(ModeProxy); err != ErrAlreadyRunning {
 		t.Fatalf("second Start: want ErrAlreadyRunning, got %v", err)
 	}
@@ -106,7 +106,7 @@ func TestBindFallbackWhenOccupied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pre-bind: %v", err)
 	}
-	defer occupied.Close()
+	defer func() { _ = occupied.Close() }()
 
 	c := config.Default()
 	c.ProxyListen = occupied.Addr().String() // already in use
@@ -115,7 +115,7 @@ func TestBindFallbackWhenOccupied(t *testing.T) {
 	if err := sup.Start(ModeProxy); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer sup.Stop()
+	defer func() { _ = sup.Stop() }()
 
 	st := sup.WaitSettled(150 * time.Millisecond)
 	l, ok := findListener(st, KindHTTP)
@@ -144,7 +144,7 @@ func TestSetConfigRejectedWhileRunning(t *testing.T) {
 	if err := sup.Start(ModeProxy); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer sup.Stop()
+	defer func() { _ = sup.Stop() }()
 	if err := sup.SetConfig(config.Default()); err != ErrAlreadyRunning {
 		t.Fatalf("SetConfig while running: want ErrAlreadyRunning, got %v", err)
 	}

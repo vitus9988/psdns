@@ -16,9 +16,10 @@
     Version: async () => "dev (preview)",
     GetConfig: async () => ({
       dohUrl: "https://1.1.1.1/dns-query", dohBootstrap: "",
+      dohFallbacks: "", dohHedgeDelay: "250ms",
       dnsListen: "127.0.0.1:53", proxyListen: "127.0.0.1:8080",
       socksListen: "127.0.0.1:1080", frag: "split", fragDelay: "0s", timeout: "10s",
-      setSystemProxy: true,
+      setSystemProxy: true, proxyBypass: "",
     }),
     GetStatus: async () => ({ running: false, mode: "proxy", listeners: [] }),
     Start: async (m) => ({
@@ -32,6 +33,8 @@
     SetConfig: async (c) => ({ config: c, warnings: [] }),
     CheckUpdate: async () => ({ current: "dev", latest: "", newer: false }),
     ApplyUpdate: async () => { throw "업데이트 자동 설치는 곧 제공될 예정이에요."; },
+    SystemProxySupported: async () => true,
+    StartupNotice: async () => "",
     Quit: async () => {},
   };
 
@@ -54,13 +57,37 @@
     return i > 0 ? addr.slice(0, i) : addr;
   };
 
+  // Toasts show one after another instead of clobbering each other: a
+  // port-fallback notice and a sysproxy notice can arrive back-to-back on a
+  // single Start, and both must reach the user.
+  const toastQueue = [];
+  let toastShowing = false;
   function toast(msg) {
+    toastQueue.push(msg);
+    if (!toastShowing) nextToast();
+  }
+  function nextToast() {
     const t = $("toast");
+    const msg = toastQueue.shift();
+    if (msg === undefined) {
+      toastShowing = false;
+      t.hidden = true;
+      return;
+    }
+    toastShowing = true;
     t.textContent = msg;
     t.hidden = false;
-    clearTimeout(toast._t);
-    toast._t = setTimeout(() => { t.hidden = true; }, 1500);
+    setTimeout(nextToast, 1800);
   }
+
+  // The sysproxy skip/failure reason outlives the toast stream: it explains why
+  // protection is on while the OS proxy was left alone, so it stays visible
+  // until dismissed, superseded, or the next Start/apply clears it.
+  function showSysProxyNotice(msg) {
+    $("sysProxyBannerSub").textContent = msg || "";
+    $("sysProxyBanner").hidden = false;
+  }
+  function clearSysProxyNotice() { $("sysProxyBanner").hidden = true; }
 
   function showError(msg) {
     const el = $("listenerErr");
@@ -194,18 +221,25 @@
     $("dnsHintText").textContent = "컴퓨터의 DNS 서버를 " + hostOf(ui.dnsListen) + " 로 바꿔 주세요";
 
     const proxyish = mode === "proxy" || mode === "run";
+    const dnsish = mode === "resolve" || mode === "run";
     proxyRow.hidden = !proxyish;
     socksRow.hidden = !proxyish;
     howto.hidden = !proxyish;
-    dnsHint.hidden = !(mode === "resolve" || mode === "run");
+    dnsHint.hidden = !dnsish;
+    // The DNS change is the user's to make and the user's to undo — psdns cannot
+    // revert it — so say so next to the instruction, not only after they stop.
+    $("dnsRevertHint").hidden = !dnsish;
 
     card.classList.toggle("is-dim", !running);
   }
 
   function renderAdvanced() {
     if (!ui) return;
+    $("fProxyBypass").value = ui.proxyBypass || "";
     $("fDoh").value = ui.dohUrl || "";
     $("fBootstrap").value = ui.dohBootstrap || "";
+    $("fDohFallbacks").value = ui.dohFallbacks || "";
+    $("fDohHedgeDelay").value = ui.dohHedgeDelay || "";
     $("fFragDelay").value = ui.fragDelay || "";
     $("fTimeout").value = ui.timeout || "";
     $("fHttp").value = ui.proxyListen || "";
@@ -224,8 +258,11 @@
 
   // ---- config persistence ----------------------------------------------------
   function readAdvancedInto(c) {
+    c.proxyBypass = $("fProxyBypass").value.trim();
     c.dohUrl = $("fDoh").value.trim();
     c.dohBootstrap = $("fBootstrap").value.trim();
+    c.dohFallbacks = $("fDohFallbacks").value.trim();
+    c.dohHedgeDelay = $("fDohHedgeDelay").value.trim();
     c.fragDelay = $("fFragDelay").value.trim();
     c.timeout = $("fTimeout").value.trim();
     c.proxyListen = $("fHttp").value.trim();
@@ -250,13 +287,16 @@
   async function togglePower() {
     const btn = $("powerBtn");
     btn.disabled = true;
+    const stoppingMode = mode;
     try {
       if (!running) {
         if (!(await persist())) { return; }
+        clearSysProxyNotice(); // a fresh Start reports its own sysproxy outcome
         $("heroTitle").textContent = "켜는 중이에요…";
         lastState = await app.Start(mode);
       } else {
         lastState = await app.Stop();
+        remindDnsRevert(stoppingMode);
       }
       running = !!(lastState && lastState.running);
       if (lastState && lastState.mode) mode = lastState.mode;
@@ -267,6 +307,21 @@
     } finally {
       btn.disabled = false;
     }
+  }
+
+  // remindDnsRevert nags about the one setting psdns cannot put back for the user.
+  // The DNS modes only work if the user points the OS resolver at us BY HAND (the
+  // connection card asks them to), and nothing in psdns can undo that — so once we
+  // stop, that resolver address is dead and their internet is down until they
+  // revert it. The system proxy is different: psdns set that itself and restores
+  // it automatically. Persistent, not a toast, because acting on it means leaving
+  // the app to open OS network settings.
+  function remindDnsRevert(stoppedMode) {
+    if (stoppedMode !== "resolve" && stoppedMode !== "run") return;
+    showSysProxyNotice(
+      "시스템 DNS 를 " + hostOf(ui && ui.dnsListen) + " 로 직접 바꿨다면 이제 원래대로" +
+      "(자동 또는 통신사/공용 DNS) 되돌려 주세요. psdns 가 꺼진 상태로 두면 인터넷이 안 될 수 있어요."
+    );
   }
 
   // notifyFallback explains why a proxy bound to an alternate port: the configured
@@ -402,7 +457,17 @@
       });
     });
 
-    $("quitBtn").addEventListener("click", () => openModal("quitModal"));
+    $("quitBtn").addEventListener("click", () => {
+      // A banner would die with the window, so the DNS reminder has to be in the
+      // confirmation itself.
+      const warn = $("quitDnsWarn");
+      const dnsish = running && (mode === "resolve" || mode === "run");
+      warn.textContent = dnsish
+        ? "시스템 DNS 를 " + hostOf(ui && ui.dnsListen) + " 로 바꿔 두었다면, 종료 후 원래대로(자동) 되돌려 주세요. 그대로 두면 인터넷이 안 돼요."
+        : "";
+      warn.hidden = !dnsish;
+      openModal("quitModal");
+    });
     $("quitConfirm").addEventListener("click", () => app.Quit());
     document.querySelectorAll('[data-close="quit"]').forEach((el) => {
       el.addEventListener("click", () => closeModal("quitModal"));
@@ -411,6 +476,7 @@
     $("updateBtn").addEventListener("click", applyUpdate);
     $("updateDot").addEventListener("click", () => $("updateBanner").scrollIntoView({ behavior: "smooth" }));
     $("updateClose").addEventListener("click", () => closeModal("updateModal"));
+    $("sysProxyBannerClose").addEventListener("click", clearSysProxyNotice);
 
     if (rt && rt.EventsOn) {
       rt.EventsOn("update:available", showUpdate);
@@ -429,10 +495,14 @@
         $("updateProgress").style.width = "0%";
         $("updateClose").hidden = false;
       });
-      // System-proxy auto-config toasts, emitted by App.Start/Stop/Shutdown.
-      rt.EventsOn("sysproxy:applied", (m) => toast(m || "시스템 프록시를 자동으로 맞췄어요"));
-      rt.EventsOn("sysproxy:restored", (m) => toast(m || "시스템 프록시를 원래대로 되돌렸어요"));
-      rt.EventsOn("sysproxy:error", (m) => toast(m || "시스템 프록시 설정에 실패했어요"));
+      // System-proxy auto-config notices, emitted by App.Start/Stop/Shutdown.
+      // Success/restore are transient toasts; a skip or failure goes to the
+      // persistent banner so its reason cannot be buried by later toasts
+      // (e.g. the port-fallback notice fired right after Start returns).
+      rt.EventsOn("sysproxy:applied", (m) => { clearSysProxyNotice(); toast(m || "시스템 프록시를 자동으로 맞췄어요"); });
+      rt.EventsOn("sysproxy:restored", (m) => { clearSysProxyNotice(); toast(m || "시스템 프록시를 원래대로 되돌렸어요"); });
+      rt.EventsOn("sysproxy:error", (m) => showSysProxyNotice(m || "시스템 프록시 설정에 실패했어요. 아래 주소를 복사해 직접 넣어 주세요."));
+      rt.EventsOn("sysproxy:conflict", (m) => showSysProxyNotice(m || "다른 로컬 프록시와 충돌해 자동 설정을 건너뛰었어요"));
     }
   }
 
@@ -447,6 +517,25 @@
       running = !!st.running;
       mode = st.mode || "proxy";
       lastState = st;
+      // Hide the system-proxy auto-config card on platforms where the OS
+      // automation can never take effect, so the user isn't offered a toggle
+      // whose only outcome is an error toast.
+      if (app.SystemProxySupported) {
+        try {
+          const supported = await app.SystemProxySupported();
+          const card = $("sysProxyCard");
+          if (card) card.hidden = !supported;
+        } catch (e) { /* older backend: leave the card visible */ }
+      }
+      // Anything that went wrong before the UI existed (a failed cleanup of a
+      // previous run's OS proxy) is parked on the backend, since an event emitted
+      // during Startup would have had no listener yet.
+      if (app.StartupNotice) {
+        try {
+          const notice = await app.StartupNotice();
+          if (notice) showSysProxyNotice(notice);
+        } catch (e) { /* older backend: nothing parked */ }
+      }
     } catch (e) {
       showError("초기화에 실패했어요: " + String(e.message || e));
       ui = await mock.GetConfig();

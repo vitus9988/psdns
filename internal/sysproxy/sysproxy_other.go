@@ -14,3 +14,5 @@ func capture() (Backup, error) { return Backup{}, errUnsupported }
 func apply(Settings) error { return errUnsupported }
 
 func restore(Backup) error { return errUnsupported }
+
+func disable() error { return errUnsupported }

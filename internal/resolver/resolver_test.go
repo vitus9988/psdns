@@ -20,10 +20,12 @@ import (
 
 // answer describes what the mock DoH server returns for a single query type.
 type answer struct {
-	a     []dnsRR // records for an A query
-	aaaa  []dnsRR // records for an AAAA query
-	fail  bool    // respond 500 (forces a request error)
-	delay time.Duration
+	a         []dnsRR // records for an A query
+	aaaa      []dnsRR // records for an AAAA query
+	fail      bool    // respond 500 (forces a request error)
+	delay     time.Duration
+	aaaaDelay time.Duration // extra delay applied only to AAAA queries
+	aDelay    time.Duration // extra delay applied only to A queries
 }
 
 type dnsRR struct {
@@ -53,6 +55,12 @@ func mockDoH(t testing.TB, ans answer) (*doh.Client, *int32) {
 		if err := q.Unpack(body); err != nil || len(q.Question) == 0 {
 			http.Error(w, "bad query", http.StatusBadRequest)
 			return
+		}
+		if ans.aaaaDelay > 0 && q.Question[0].Qtype == dns.TypeAAAA {
+			time.Sleep(ans.aaaaDelay)
+		}
+		if ans.aDelay > 0 && q.Question[0].Qtype == dns.TypeA {
+			time.Sleep(ans.aDelay)
 		}
 		if ans.fail {
 			http.Error(w, "boom", http.StatusInternalServerError)
@@ -232,6 +240,104 @@ func TestResolvePartialError(t *testing.T) {
 	}
 }
 
+// TestResolveSlowAAAADoesNotStall verifies a slow (or unanswered) AAAA query does
+// not hold up a name whose A record already resolved: Resolve returns the A
+// address well before the AAAA delay elapses (RFC 8305 Resolution Delay). Before
+// the fix, lookup waited for both families, so this would block ~2s.
+func TestResolveSlowAAAADoesNotStall(t *testing.T) {
+	c, _ := mockDoH(t, answer{
+		a:         []dnsRR{{ip: "1.2.3.4", ttl: 60}},
+		aaaa:      []dnsRR{{ip: "2001:db8::1", ttl: 60}},
+		aaaaDelay: 2 * time.Second,
+	})
+	r := resolver.New(c)
+
+	start := time.Now()
+	ips, err := r.Resolve(context.Background(), "slow.example.com")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !ipStrings(ips)["1.2.3.4"] {
+		t.Fatalf("expected A address, got %v", ips)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Resolve stalled on slow AAAA: took %v, want well under the 2s AAAA delay", elapsed)
+	}
+}
+
+// TestResolveSlowAKeepsIPv4 covers the reverse race: AAAA answers first and A
+// lags past the 50ms grace. The A records must still be merged (IPv4 first) —
+// an IPv6-only result fails to dial on networks without IPv6 and stays cached.
+func TestResolveSlowAKeepsIPv4(t *testing.T) {
+	c, _ := mockDoH(t, answer{
+		a:      []dnsRR{{ip: "1.2.3.4", ttl: 60}},
+		aaaa:   []dnsRR{{ip: "2001:db8::1", ttl: 60}},
+		aDelay: 200 * time.Millisecond,
+	})
+	r := resolver.New(c)
+
+	ips, err := r.Resolve(context.Background(), "slow-a.example.com")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(ips) != 2 || ips[0].String() != "1.2.3.4" {
+		t.Fatalf("want [1.2.3.4 2001:db8::1] (IPv4 first), got %v", ips)
+	}
+}
+
+// TestResolveFallback covers the system-resolver fallback: it answers only when
+// DoH produced no address, never overrides a DoH answer, and is not cached.
+func TestResolveFallback(t *testing.T) {
+	var calls int32
+	fallback := func(context.Context, string) ([]net.IP, error) {
+		atomic.AddInt32(&calls, 1)
+		return []net.IP{net.ParseIP("10.0.0.7")}, nil
+	}
+
+	for name, ans := range map[string]answer{"nodata": {}, "doh error": {fail: true}} {
+		t.Run(name, func(t *testing.T) {
+			atomic.StoreInt32(&calls, 0)
+			c, reqCount := mockDoH(t, ans)
+			r := resolver.New(c)
+			r.Fallback = fallback
+			for i := 0; i < 2; i++ {
+				ips, err := r.Resolve(context.Background(), "nas.local")
+				if err != nil || len(ips) != 1 || ips[0].String() != "10.0.0.7" {
+					t.Fatalf("Resolve#%d = %v, %v; want the fallback address", i, ips, err)
+				}
+			}
+			// Both calls went to DoH first: the fallback answer was not cached.
+			if atomic.LoadInt32(&calls) != 2 || atomic.LoadInt32(reqCount) < 4 {
+				t.Fatalf("fallback calls=%d doh requests=%d; want 2 and >=4", calls, *reqCount)
+			}
+		})
+	}
+
+	t.Run("doh answered", func(t *testing.T) {
+		atomic.StoreInt32(&calls, 0)
+		c, _ := mockDoH(t, answer{a: []dnsRR{{ip: "1.2.3.4", ttl: 60}}})
+		r := resolver.New(c)
+		r.Fallback = fallback
+		ips, err := r.Resolve(context.Background(), "example.com")
+		if err != nil || len(ips) != 1 || ips[0].String() != "1.2.3.4" {
+			t.Fatalf("Resolve = %v, %v; want the DoH address", ips, err)
+		}
+		if n := atomic.LoadInt32(&calls); n != 0 {
+			t.Fatalf("fallback must not run when DoH answered, ran %d times", n)
+		}
+	})
+}
+
+// TestSystemLookup checks the production fallback against the OS resolver;
+// localhost resolves everywhere without touching the network.
+func TestSystemLookup(t *testing.T) {
+	ips, err := resolver.SystemLookup(context.Background(), "localhost")
+	if err != nil || len(ips) == 0 || !ips[0].IsLoopback() {
+		t.Fatalf("SystemLookup(localhost) = %v, %v; want loopback", ips, err)
+	}
+}
+
 // TestResolveDedupsConcurrent verifies that many concurrent misses for the same
 // host collapse into one upstream lookup (A+AAAA = 2 requests) via in-flight
 // de-duplication, instead of each goroutine firing its own pair.
@@ -292,5 +398,77 @@ func TestResolveCacheKeyCaseInsensitive(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(reqCount); got != first {
 		t.Fatalf("case-variant lookup hit upstream: requests %d -> %d (want cache hit)", first, got)
+	}
+}
+
+// TestResolveLeaderCancelDoesNotFailJoiner verifies that when the caller that
+// started a shared lookup (the leader) cancels its context, a second caller that
+// joined the same lookup with a live context still receives the answer instead
+// of inheriting the leader's cancellation. The shared lookup runs detached from
+// any single caller's deadline, so the leader giving up must not abort it.
+func TestResolveLeaderCancelDoesNotFailJoiner(t *testing.T) {
+	c, _ := mockDoH(t, answer{
+		a:     []dnsRR{{ip: "1.2.3.4", ttl: 300}},
+		aaaa:  []dnsRR{{ip: "2001:db8::1", ttl: 300}},
+		delay: 400 * time.Millisecond, // hold the lookup open long enough to cancel mid-flight
+	})
+	r := resolver.New(c)
+
+	type result struct {
+		ips []net.IP
+		err error
+	}
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderCh := make(chan result, 1)
+	joinerCh := make(chan result, 1)
+
+	go func() {
+		ips, err := r.Resolve(leaderCtx, "example.com")
+		leaderCh <- result{ips, err}
+	}()
+	time.Sleep(50 * time.Millisecond) // let the leader register the in-flight lookup
+	go func() {
+		ips, err := r.Resolve(context.Background(), "example.com")
+		joinerCh <- result{ips, err}
+	}()
+	time.Sleep(50 * time.Millisecond) // let the joiner attach to it
+	cancelLeader()
+
+	if lr := <-leaderCh; lr.err == nil {
+		t.Fatal("leader whose context was cancelled should return an error")
+	}
+	jr := <-joinerCh
+	if jr.err != nil {
+		t.Fatalf("joiner with a live context must still resolve: %v", jr.err)
+	}
+	if !ipStrings(jr.ips)["1.2.3.4"] {
+		t.Fatalf("joiner result missing A record: %v", jr.ips)
+	}
+}
+
+// TestResolveReturnsCopyNotCachedSlice verifies Resolve hands back a copy of the
+// IP slice: a caller mutating its result must not corrupt the slice retained in
+// the cache and served to later callers.
+func TestResolveReturnsCopyNotCachedSlice(t *testing.T) {
+	c, _ := mockDoH(t, answer{a: []dnsRR{{ip: "1.2.3.4", ttl: 300}, {ip: "5.6.7.8", ttl: 300}}})
+	r := resolver.New(c)
+
+	first, err := r.Resolve(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	if len(first) == 0 {
+		t.Fatal("no IPs returned")
+	}
+	for i := range first { // clobber the returned slice
+		first[i] = net.ParseIP("9.9.9.9")
+	}
+
+	second, err := r.Resolve(context.Background(), "example.com") // served from cache
+	if err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+	if !ipStrings(second)["1.2.3.4"] {
+		t.Fatalf("cache corrupted by caller mutation: %v", second)
 	}
 }

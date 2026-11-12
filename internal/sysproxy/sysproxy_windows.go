@@ -3,6 +3,7 @@
 package sysproxy
 
 import (
+	"errors"
 	"fmt"
 
 	"golang.org/x/sys/windows"
@@ -14,7 +15,10 @@ import (
 // also poke wininet.dll's InternetSetOptionW to make WinINET reload. Chrome/Edge/
 // IE honor these settings; Firefox uses its own and is unaffected.
 
-const inetSettingsPath = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+// inetSettingsPath is the HKCU subkey holding the WinINET proxy values. It is a
+// var, not a const, so tests can point capture/apply/restore/disable at a scratch
+// key instead of the user's real network settings.
+var inetSettingsPath = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 
 func supported() bool { return true }
 
@@ -83,7 +87,7 @@ func restore(b Backup) error {
 	if w.ProxyEnableExisted {
 		record(k.SetDWordValue("ProxyEnable", w.ProxyEnable))
 	} else {
-		_ = k.DeleteValue("ProxyEnable") // absent before: delete; not-found is fine
+		record(deleteValue(k, "ProxyEnable")) // absent before: delete it again
 	}
 	record(restoreString(k, "ProxyServer", w.ProxyServer, w.ProxyServerExisted))
 	record(restoreString(k, "ProxyOverride", w.ProxyOverride, w.ProxyOverrideExisted))
@@ -96,14 +100,39 @@ func restore(b Backup) error {
 	return nil
 }
 
+// disable clears ProxyEnable, leaving ProxyServer/ProxyOverride alone (there is
+// no captured state to put back here). See DisableApplied.
+func disable() error {
+	k, err := registry.OpenKey(registry.CURRENT_USER, inetSettingsPath, registry.SET_VALUE)
+	if err != nil {
+		return fmt.Errorf("시스템 프록시 설정을 열지 못했어요: %v", err)
+	}
+	defer k.Close()
+
+	if err := k.SetDWordValue("ProxyEnable", 0); err != nil {
+		return fmt.Errorf("시스템 프록시 해제에 실패했어요: %v", err)
+	}
+	notifyWinInetChanged()
+	return nil
+}
+
 // restoreString sets name back to val, or deletes it when it did not exist
-// before (so a value we created is removed rather than left empty). Delete of an
-// absent value is treated as success.
+// before (so a value we created is removed rather than left empty).
 func restoreString(k registry.Key, name, val string, existed bool) error {
 	if existed {
 		return k.SetStringValue(name, val)
 	}
-	_ = k.DeleteValue(name)
+	return deleteValue(k, name)
+}
+
+// deleteValue removes name, treating "it was already gone" as success. Any other
+// failure is reported: swallowing it used to turn a refused delete into a
+// reported success, which deleted the backup and left the proxy enabled at our
+// now-dead address with no way to recover it.
+func deleteValue(k registry.Key, name string) error {
+	if err := k.DeleteValue(name); err != nil && !errors.Is(err, registry.ErrNotExist) {
+		return err
+	}
 	return nil
 }
 

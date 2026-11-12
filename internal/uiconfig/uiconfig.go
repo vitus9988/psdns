@@ -6,7 +6,9 @@ package uiconfig
 import (
 	"fmt"
 	"net"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/vitus9988/psdns/internal/config"
 	"github.com/vitus9988/psdns/internal/doh"
@@ -16,17 +18,21 @@ import (
 // as human strings ("10s", "10ms") because Wails/JSON marshals time.Duration as
 // a raw int64 nanosecond count, which is unusable in the UI.
 type Config struct {
-	DoHURL       string `json:"dohUrl"`
-	DoHBootstrap string `json:"dohBootstrap"`
-	DNSListen    string `json:"dnsListen"`
-	ProxyListen  string `json:"proxyListen"`
-	SocksListen  string `json:"socksListen"`
-	Frag         string `json:"frag"` // none | split | tls-record
-	FragDelay    string `json:"fragDelay"`
-	Timeout      string `json:"timeout"`
+	DoHURL        string `json:"dohUrl"`
+	DoHBootstrap  string `json:"dohBootstrap"`
+	DoHFallbacks  string `json:"dohFallbacks"`
+	DoHHedgeDelay string `json:"dohHedgeDelay"`
+	DNSListen     string `json:"dnsListen"`
+	ProxyListen   string `json:"proxyListen"`
+	SocksListen   string `json:"socksListen"`
+	Frag          string `json:"frag"` // none | split | tls-record
+	FragDelay     string `json:"fragDelay"`
+	Timeout       string `json:"timeout"`
 
 	// SetSystemProxy mirrors config.SetSystemProxy (GUI-only auto system proxy).
 	SetSystemProxy bool `json:"setSystemProxy"`
+	// ProxyBypass is config.ProxyBypass as one comma-separated string.
+	ProxyBypass string `json:"proxyBypass"`
 }
 
 // SetResult is the response of a config update: the applied config plus any
@@ -39,16 +45,19 @@ type SetResult struct {
 // FromConfig renders a runtime config for the UI.
 func FromConfig(c config.Config) Config {
 	return Config{
-		DoHURL:       c.DoHURL,
-		DoHBootstrap: c.DoHBootstrap,
-		DNSListen:    c.DNSListen,
-		ProxyListen:  c.ProxyListen,
-		SocksListen:  c.SocksListen,
-		Frag:         string(c.Frag),
-		FragDelay:    c.FragDelay.String(),
-		Timeout:      c.Timeout.String(),
+		DoHURL:        c.DoHURL,
+		DoHBootstrap:  c.DoHBootstrap,
+		DoHFallbacks:  config.FormatDoHList(c.DoHFallbacks),
+		DoHHedgeDelay: c.DoHHedgeDelay.String(),
+		DNSListen:     c.DNSListen,
+		ProxyListen:   c.ProxyListen,
+		SocksListen:   c.SocksListen,
+		Frag:          string(c.Frag),
+		FragDelay:     c.FragDelay.String(),
+		Timeout:       c.Timeout.String(),
 
 		SetSystemProxy: c.SetSystemProxy,
+		ProxyBypass:    strings.Join(c.ProxyBypass, ", "),
 	}
 }
 
@@ -63,6 +72,7 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 		c.DoHURL = u.DoHURL
 	}
 	c.DoHBootstrap = u.DoHBootstrap
+	c.DoHFallbacks = config.ParseDoHList(u.DoHFallbacks)
 	if u.DNSListen != "" {
 		c.DNSListen = u.DNSListen
 	}
@@ -75,6 +85,11 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 
 	// SetSystemProxy is a plain bool with no validation; carry it through.
 	c.SetSystemProxy = u.SetSystemProxy
+	bypass, err := ParseBypass(u.ProxyBypass)
+	if err != nil {
+		return c, warns, err
+	}
+	c.ProxyBypass = bypass
 
 	switch config.FragStrategy(u.Frag) {
 	case config.FragNone, config.FragSplit, config.FragTLSRecord:
@@ -95,6 +110,16 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 		}
 		c.FragDelay = d
 	}
+	if u.DoHHedgeDelay != "" {
+		d, err := time.ParseDuration(u.DoHHedgeDelay)
+		if err != nil {
+			return c, warns, fmt.Errorf("DoH 폴백 지연 형식이 올바르지 않아요: %q (예: 250ms)", u.DoHHedgeDelay)
+		}
+		if d < 0 || d > config.MaxDoHHedgeDelay {
+			return c, warns, fmt.Errorf("DoH 폴백 지연이 범위를 벗어났어요: %q (0 ~ %v)", u.DoHHedgeDelay, config.MaxDoHHedgeDelay)
+		}
+		c.DoHHedgeDelay = d
+	}
 	if u.Timeout != "" {
 		d, err := time.ParseDuration(u.Timeout)
 		if err != nil {
@@ -111,20 +136,13 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 
 	// The bootstrap, when set, must be an IP (optionally with a port): it is the
 	// address actually dialed for the DoH host, so a hostname there would defeat
-	// the point of bypassing system DNS. doh.New treats a bad value as a bare
-	// host without complaint, so validate it here.
-	if c.DoHBootstrap != "" {
-		hostPart := c.DoHBootstrap
-		if h, _, err := net.SplitHostPort(c.DoHBootstrap); err == nil {
-			hostPart = h
-		}
-		if net.ParseIP(hostPart) == nil {
-			return c, warns, fmt.Errorf("부트스트랩 주소는 IP여야 해요: %q (예: 1.1.1.1 또는 1.1.1.1:853)", c.DoHBootstrap)
-		}
+	// the point of bypassing system DNS.
+	if err := config.ValidateBootstrap(c.DoHBootstrap); err != nil {
+		return c, warns, fmt.Errorf("부트스트랩 주소는 IP여야 해요: %q (예: 1.1.1.1 또는 1.1.1.1:853)", c.DoHBootstrap)
 	}
 
 	// Validate the DoH endpoint by actually constructing a client (no network).
-	if _, err := doh.New(c.DoHURL, c.DoHBootstrap, c.Timeout); err != nil {
+	if _, err := doh.NewExchanger(c.DoHURL, c.DoHBootstrap, c.DoHFallbacks, c.Timeout, c.DoHHedgeDelay); err != nil {
 		return c, warns, fmt.Errorf("DoH 주소가 올바르지 않아요: %v", err)
 	}
 
@@ -133,4 +151,33 @@ func (u Config) ToConfig() (config.Config, []string, error) {
 	}
 
 	return c, warns, nil
+}
+
+// ParseBypass turns the user's proxy-exception text into normalized host names.
+// Entries are separated by commas, semicolons or whitespace; a pasted URL is cut
+// down to its host ("https://www.Bank.co.kr:443/login" -> "www.bank.co.kr") and
+// a leading "*." or "." is dropped (subdomains are always covered). This is a
+// trust boundary: the hosts are written verbatim into OS proxy settings — the
+// Windows ProxyOverride ";" list and a GNOME GVariant '...' literal — so anything
+// beyond letters, digits, '-' and '.' is rejected.
+func ParseBypass(s string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ';' || unicode.IsSpace(r) }) {
+		h := strings.ToLower(f)
+		if i := strings.Index(h, "://"); i >= 0 {
+			h = h[i+3:]
+		}
+		h, _, _ = strings.Cut(h, "/")
+		h, _, _ = strings.Cut(h, ":")
+		h = strings.Trim(strings.TrimPrefix(h, "*"), ".")
+		if h == "" || strings.Trim(h, "abcdefghijklmnopqrstuvwxyz0123456789.-") != "" {
+			return nil, fmt.Errorf("프록시 예외 사이트 형식이 올바르지 않아요: %q (예: example.com)", f)
+		}
+		if !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	return out, nil
 }

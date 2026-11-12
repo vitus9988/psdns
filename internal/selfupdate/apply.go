@@ -13,11 +13,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"runtime"
 	"strings"
 
 	minio "github.com/minio/selfupdate"
+)
+
+// Test seams: swapped by unit tests so a full Apply can be exercised without
+// touching the real running executable. Defaults are the real implementations.
+var (
+	osExecutable = os.Executable
+	minioApply   = minio.Apply
 )
 
 // Stage marks progress through an Apply run, reported via the progress callback.
@@ -62,61 +70,48 @@ func (c *Checker) Apply(ctx context.Context, progress func(Stage, float64)) erro
 		return ErrUpToDate
 	}
 
-	bin, err := c.fetchVerifiedBinary(ctx, rel, report)
+	archive, assetName, err := c.fetchVerifiedArchive(ctx, rel, report)
 	if err != nil {
 		return err
 	}
 
+	report(StageExtract, 0.8)
 	report(StageReplace, 0.9)
-	if err := minio.Apply(bytes.NewReader(bin), minio.Options{}); err != nil {
-		if rb := minio.RollbackError(err); rb != nil {
-			return fmt.Errorf("selfupdate: 교체에 실패했고 되돌리기도 실패했어요. 릴리즈 페이지에서 직접 받아 주세요: %v", rb)
-		}
-		return fmt.Errorf("selfupdate: 실행파일 교체에 실패했어요: %w", err)
+	if err := c.replace(archive, assetName); err != nil {
+		return err
 	}
 	report(StageDone, 1)
 	return nil
 }
 
-// fetchVerifiedBinary resolves the asset for this platform, downloads it and the
-// checksums file, verifies the archive's SHA-256, and returns the extracted GUI
-// binary bytes. It deliberately does NOT touch the filesystem, so it is fully
-// unit-testable without replacing the real executable.
-func (c *Checker) fetchVerifiedBinary(ctx context.Context, rel release, report func(Stage, float64)) ([]byte, error) {
-	assetName := assetNameFor(runtime.GOOS, runtime.GOARCH, rel.TagName)
-	a := findAsset(rel, assetName)
-	if a == nil {
-		return nil, ErrNoAsset
+// replace installs the verified archive over the running program. When the
+// program runs from inside a macOS .app bundle it swaps the whole bundle (so the
+// executable, Info.plist and code signature stay mutually consistent — replacing
+// only the inner Mach-O would invalidate a signed bundle's signature and stop it
+// launching). Everywhere else — and for the bare CLI binary on macOS — it
+// replaces the single executable in place via minio/selfupdate.
+func (c *Checker) replace(archive []byte, assetName string) error {
+	if exe, err := osExecutable(); err == nil {
+		if root, ok := macAppBundleRoot(exe); ok {
+			return replaceMacAppBundle(archive, root)
+		}
 	}
-	sumsAsset := findAsset(rel, checksumsNameFor(rel.TagName))
-	if sumsAsset == nil {
-		return nil, ErrNoChecksums
-	}
-
-	report(StageDownload, 0.05)
-	sums, err := c.downloadChecksums(ctx, sumsAsset.BrowserDownloadURL)
+	bin, err := extractBinary(archive, assetName, c.binaryFileName())
 	if err != nil {
-		return nil, err
+		return err
 	}
-	want, ok := sums[assetName]
-	if !ok {
-		return nil, fmt.Errorf("selfupdate: checksums에 %s 항목이 없어요", assetName)
+	if err := minioApply(bytes.NewReader(bin), minio.Options{}); err != nil {
+		if rb := minio.RollbackError(err); rb != nil {
+			return fmt.Errorf("selfupdate: 교체에 실패했고 되돌리기도 실패했어요. 릴리즈 페이지에서 직접 받아 주세요: %v", rb)
+		}
+		return fmt.Errorf("selfupdate: 실행파일 교체에 실패했어요: %w", err)
 	}
+	return nil
+}
 
-	archive, err := c.downloadBytes(ctx, a.BrowserDownloadURL, func(p float64) {
-		report(StageDownload, 0.05+0.6*p)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	report(StageVerify, 0.7)
-	got := sha256.Sum256(archive)
-	if !strings.EqualFold(hex.EncodeToString(got[:]), want) {
-		return nil, ErrChecksumMismatch
-	}
-
-	report(StageExtract, 0.8)
+// binaryFileName is the on-disk name of the binary to pull from the archive:
+// c.Binary (CLI vs GUI) or the default, with the Windows .exe suffix.
+func (c *Checker) binaryFileName() string {
 	binName := c.Binary
 	if binName == "" {
 		binName = BinaryName
@@ -124,7 +119,58 @@ func (c *Checker) fetchVerifiedBinary(ctx context.Context, rel release, report f
 	if runtime.GOOS == "windows" {
 		binName += ".exe"
 	}
-	return extractBinary(archive, assetName, binName)
+	return binName
+}
+
+// fetchVerifiedArchive resolves the asset for this platform, downloads it and the
+// checksums file, and verifies the archive's SHA-256. It deliberately does NOT
+// touch the filesystem, so it is fully unit-testable without replacing anything.
+func (c *Checker) fetchVerifiedArchive(ctx context.Context, rel release, report func(Stage, float64)) (archive []byte, assetName string, err error) {
+	assetName = assetNameFor(runtime.GOOS, runtime.GOARCH, rel.TagName)
+	a := findAsset(rel, assetName)
+	if a == nil {
+		return nil, "", ErrNoAsset
+	}
+	sumsAsset := findAsset(rel, checksumsNameFor(rel.TagName))
+	if sumsAsset == nil {
+		return nil, "", ErrNoChecksums
+	}
+
+	report(StageDownload, 0.05)
+	sums, err := c.downloadChecksums(ctx, sumsAsset.BrowserDownloadURL)
+	if err != nil {
+		return nil, "", err
+	}
+	want, ok := sums[assetName]
+	if !ok {
+		return nil, "", fmt.Errorf("selfupdate: checksums에 %s 항목이 없어요", assetName)
+	}
+
+	archive, err = c.downloadBytes(ctx, a.BrowserDownloadURL, func(p float64) {
+		report(StageDownload, 0.05+0.6*p)
+	})
+	if err != nil {
+		return nil, "", err
+	}
+
+	report(StageVerify, 0.7)
+	got := sha256.Sum256(archive)
+	if !strings.EqualFold(hex.EncodeToString(got[:]), want) {
+		return nil, "", ErrChecksumMismatch
+	}
+	return archive, assetName, nil
+}
+
+// fetchVerifiedBinary fetches and verifies the archive, then extracts this
+// program's binary bytes. Kept FS-free for unit tests that only assert the
+// download/verify/extract chain (the bundle path in replace does touch disk).
+func (c *Checker) fetchVerifiedBinary(ctx context.Context, rel release, report func(Stage, float64)) ([]byte, error) {
+	archive, assetName, err := c.fetchVerifiedArchive(ctx, rel, report)
+	if err != nil {
+		return nil, err
+	}
+	report(StageExtract, 0.8)
+	return extractBinary(archive, assetName, c.binaryFileName())
 }
 
 func (c *Checker) get(ctx context.Context, url string) (*http.Response, error) {
@@ -138,7 +184,7 @@ func (c *Checker) get(ctx context.Context, url string) (*http.Response, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("selfupdate: 다운로드 실패 (status %d)", resp.StatusCode)
 	}
 	return resp, nil
@@ -149,7 +195,7 @@ func (c *Checker) downloadChecksums(ctx context.Context, url string) (map[string
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	m := map[string]string{}
 	sc := bufio.NewScanner(io.LimitReader(resp.Body, 1<<20))
@@ -170,9 +216,16 @@ func (c *Checker) downloadBytes(ctx context.Context, url string, onProgress func
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	total := resp.ContentLength
+	// Reject an over-cap archive up front with a clear message. Without this the
+	// LimitReader below would silently truncate at maxDownload and the truncated
+	// bytes would fail the SHA-256 check, surfacing as a confusing "checksum
+	// mismatch" instead of "too large".
+	if total > maxDownload {
+		return nil, fmt.Errorf("selfupdate: 릴리즈 파일이 너무 커요 (%d바이트 > 최대 %d바이트)", total, int64(maxDownload))
+	}
 	var buf bytes.Buffer
 	body := io.LimitReader(resp.Body, maxDownload)
 	chunk := make([]byte, 64*1024)
@@ -212,7 +265,7 @@ func extractFromTarGz(data []byte, binName string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	tr := tar.NewReader(gz)
 	for {
 		h, err := tr.Next()
@@ -243,7 +296,7 @@ func extractFromZip(data []byte, binName string) ([]byte, error) {
 			return nil, err
 		}
 		b, err := io.ReadAll(io.LimitReader(rc, maxDownload))
-		rc.Close()
+		_ = rc.Close()
 		return b, err
 	}
 	return nil, ErrBinaryNotFound

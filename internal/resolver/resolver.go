@@ -31,7 +31,14 @@ type entry struct {
 
 // Resolver resolves names via a DoH client.
 type Resolver struct {
-	doh   *doh.Client
+	// Fallback, when set, resolves a name DoH could not (error or no addresses):
+	// .local / intranet / hosts-file names, or a domain the DoH upstream fails
+	// (e.g. SERVFAIL on broken DNSSEC). It never runs when DoH answered, so a
+	// tampered system DNS cannot override a DoH result. Its results are not
+	// cached. Set it before first use; nil disables it.
+	Fallback func(ctx context.Context, host string) ([]net.IP, error)
+
+	doh   doh.Exchanger
 	mu    sync.Mutex
 	cache map[string]entry
 	// inflight collapses concurrent misses for the same host into a single
@@ -48,9 +55,15 @@ type inflightCall struct {
 }
 
 // New returns a Resolver backed by the given DoH client.
-func New(c *doh.Client) *Resolver {
+func New(c doh.Exchanger) *Resolver {
 	return &Resolver{doh: c, cache: make(map[string]entry), inflight: make(map[string]*inflightCall)}
 }
+
+// maxLookupTime bounds the shared upstream lookup that runLookup performs for
+// all joined callers. Each caller still returns the instant its own context is
+// done (via the select in Resolve); this is only a safety ceiling so that a
+// pathological upstream cannot leave the lookup goroutine running forever.
+const maxLookupTime = 30 * time.Second
 
 // Resolve returns the IPs for host. An IP literal is returned unchanged.
 func (r *Resolver) Resolve(ctx context.Context, host string) ([]net.IP, error) {
@@ -62,36 +75,60 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]net.IP, error) {
 	// "Example.com" and "example.com" would be cached (and resolved) separately.
 	key := strings.ToLower(host)
 
-	now := time.Now()
 	r.mu.Lock()
-	if e, ok := r.cache[key]; ok && now.Before(e.expires) {
+	if e, ok := r.cache[key]; ok && time.Now().Before(e.expires) {
 		ips := e.ips
 		r.mu.Unlock()
-		return ips, nil
+		return cloneIPs(ips), nil // copy so a caller cannot mutate the cached slice
 	}
-	// Join an in-flight lookup for the same host instead of firing a duplicate.
-	if call, ok := r.inflight[key]; ok {
-		r.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.ips, call.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	// Join the in-flight lookup for this host, or become its leader. The leader
+	// launches the single shared lookup; every caller — leader included — then
+	// waits on the same result while independently honouring its own context.
+	call, leader := r.inflight[key], false
+	if call == nil {
+		call = &inflightCall{done: make(chan struct{})}
+		r.inflight[key] = call
+		leader = true
 	}
-	// Become the leader: publish the in-flight call before releasing the lock so
-	// every later caller joins it.
-	call := &inflightCall{done: make(chan struct{})}
-	r.inflight[key] = call
 	r.mu.Unlock()
+
+	if leader {
+		go r.runLookup(key, call)
+	}
+
+	select {
+	case <-call.done:
+		return cloneIPs(call.ips), call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// runLookup performs the one shared upstream lookup for key and publishes the
+// result to every caller waiting on call. It runs under a context detached from
+// any single caller's deadline (bounded only by maxLookupTime) so that a caller
+// giving up — its own context cancelled — cannot abort a lookup that other,
+// still-waiting callers depend on. On success the answer is cached.
+func (r *Resolver) runLookup(key string, call *inflightCall) {
+	ctx, cancel := context.WithTimeout(context.Background(), maxLookupTime)
+	defer cancel()
 
 	ips, ttl, err := r.lookup(ctx, key)
 	if err == nil && len(ips) == 0 {
-		err = fmt.Errorf("no addresses for %s", host)
+		err = fmt.Errorf("no addresses for %s", key)
+	}
+	cache := err == nil
+	if err != nil && r.Fallback != nil {
+		// Not cached: if DoH only hiccupped, a system-DNS answer (possibly a
+		// forged block page) must not outlive the hiccup.
+		if fips, ferr := r.Fallback(ctx, key); ferr == nil && len(fips) > 0 {
+			ips, err = fips, nil
+		}
 	}
 
+	now := time.Now()
 	r.mu.Lock()
-	if err == nil {
+	if cache {
 		r.storeLocked(key, entry{ips: ips, expires: now.Add(ttl)}, now)
 	}
 	delete(r.inflight, key)
@@ -99,7 +136,34 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]net.IP, error) {
 
 	call.ips, call.err = ips, err
 	close(call.done)
-	return ips, err
+}
+
+// SystemLookup resolves host with the OS resolver (mDNS, hosts file, intranet
+// DNS), IPv4 first to match lookup's dial order. It is the production Fallback.
+func SystemLookup(ctx context.Context, host string) ([]net.IP, error) {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var v4, v6 []net.IP
+	for _, a := range addrs {
+		if a.IP.To4() != nil {
+			v4 = append(v4, a.IP)
+		} else {
+			v6 = append(v6, a.IP)
+		}
+	}
+	return append(v4, v6...), nil
+}
+
+// cloneIPs returns a shallow copy of ips so a caller may sort or append to its
+// result without corrupting the slice held in the cache — which the inflight
+// leader's result and every later cache hit share.
+func cloneIPs(ips []net.IP) []net.IP {
+	if ips == nil {
+		return nil
+	}
+	return append([]net.IP(nil), ips...)
 }
 
 // storeLocked inserts e under key while enforcing maxCacheEntries. The caller
@@ -128,56 +192,126 @@ func (r *Resolver) storeLocked(key string, e entry, now time.Time) {
 	r.cache[key] = e
 }
 
-// lookup queries A and AAAA concurrently over DoH and merges the answers.
+// resolutionDelay bounds how long lookup waits for the second address family
+// once the first has already returned usable addresses (RFC 8305 §3 "Resolution
+// Delay"). A dual-stack host still returns both A and AAAA in the common case,
+// but a slow or unanswered AAAA can no longer stall a name whose A already
+// resolved — a stall that, with all traffic forced through the proxy, shows up as
+// a normally-working site hanging for the full timeout.
+const resolutionDelay = 50 * time.Millisecond
+
+// familyResult is one address family's answer from the DoH upstream.
+type familyResult struct {
+	qtype   uint16
+	ips     []net.IP
+	ttl     uint32
+	haveTTL bool
+	err     error
+}
+
+// lookup queries A and AAAA concurrently over DoH and merges the answers IPv4
+// first. It returns as soon as one family yields addresses, waiting only
+// resolutionDelay for the other, so a hung query for one family cannot hold up a
+// name the other already resolved. An error is returned only when neither family
+// produced any address (both empty or both failed).
 func (r *Resolver) lookup(ctx context.Context, host string) ([]net.IP, time.Duration, error) {
 	fqdn := dns.Fqdn(host)
 
-	var (
-		mu       sync.Mutex
-		ips      []net.IP
-		ttl      uint32
-		haveTTL  bool
-		firstErr error
-	)
-
-	query := func(qtype uint16) {
+	query := func(qtype uint16) familyResult {
 		m := new(dns.Msg)
 		m.SetQuestion(fqdn, qtype)
 		m.RecursionDesired = true
 		m.SetEdns0(4096, false) // advertise a larger UDP buffer to the upstream
 		resp, err := r.doh.Exchange(ctx, m)
-
-		mu.Lock()
-		defer mu.Unlock()
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			return
+			return familyResult{qtype: qtype, err: err}
 		}
+		res := familyResult{qtype: qtype}
 		for _, rr := range resp.Answer {
-			var ip net.IP
 			switch v := rr.(type) {
 			case *dns.A:
-				ip = v.A
+				res.ips = append(res.ips, v.A)
 			case *dns.AAAA:
-				ip = v.AAAA
+				res.ips = append(res.ips, v.AAAA)
 			default:
 				continue
 			}
-			ips = append(ips, ip)
-			if t := rr.Header().Ttl; !haveTTL || t < ttl {
-				ttl = t
-				haveTTL = true
+			if t := rr.Header().Ttl; !res.haveTTL || t < res.ttl {
+				res.ttl = t
+				res.haveTTL = true
 			}
+		}
+		return res
+	}
+
+	// Buffered so a family that arrives after we have already returned can still
+	// deliver its result and its goroutine exit without leaking.
+	ch := make(chan familyResult, 2)
+	go func() { ch <- query(dns.TypeA) }()
+	go func() { ch <- query(dns.TypeAAAA) }()
+
+	var (
+		v4, v6   []net.IP
+		ttl      uint32
+		haveTTL  bool
+		firstErr error
+	)
+	merge := func(res familyResult) {
+		if res.err != nil {
+			if firstErr == nil {
+				firstErr = res.err
+			}
+			return
+		}
+		if res.qtype == dns.TypeA {
+			v4 = append(v4, res.ips...)
+		} else {
+			v6 = append(v6, res.ips...)
+		}
+		if res.haveTTL && (!haveTTL || res.ttl < ttl) {
+			ttl = res.ttl
+			haveTTL = true
 		}
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); query(dns.TypeA) }()
-	go func() { defer wg.Done(); query(dns.TypeAAAA) }()
-	wg.Wait()
+	// Wait for the first family to return.
+	select {
+	case res := <-ch:
+		merge(res)
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	}
+
+	// Only an A-first answer gets the short grace period for AAAA. If AAAA came
+	// first (or nothing usable yet), wait for the other family unconditionally:
+	// dialUpstream does no Happy Eyeballs racing, so dropping a late A would leave
+	// an IPv6-only result — cached for the TTL — that fails with "no route to
+	// host" on the many networks without IPv6, breaking a site that loads fine
+	// without psdns.
+	// ponytail: an answered AAAA with a hung A waits out the caller's timeout;
+	// race the families at dial time if that ever shows up.
+	if len(v4) > 0 {
+		timer := time.NewTimer(resolutionDelay)
+		defer timer.Stop()
+		select {
+		case res := <-ch:
+			merge(res)
+		case <-timer.C:
+		case <-ctx.Done():
+		}
+	} else {
+		select {
+		case res := <-ch:
+			merge(res)
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		}
+	}
+
+	// Merge IPv4 before IPv6 so the dial order is deterministic (the two queries
+	// race, so raw arrival order is not) and IPv4-first: on a host with broken
+	// IPv6 the reachable address is tried before the dead one.
+	ips := append(v4, v6...)
 
 	if len(ips) == 0 {
 		if firstErr != nil {

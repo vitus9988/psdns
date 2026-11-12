@@ -50,7 +50,7 @@ cd psdns_v1.0.0_darwin_arm64
 ./psdns proxy
 ```
 
-**GUI로 쓰려면** 압축을 푼 뒤 `psdns-gui`(macOS는 `psdns.app`)를 실행하세요. 창이 열리면 **보호 시작하기** 버튼 하나면 됩니다 — 기본적으로 이 컴퓨터의 시스템 웹 프록시(http·https)를 psdns로 **자동 설정**하므로 브라우저 프록시를 직접 켤 필요가 없고, 보호를 중지하거나 앱을 종료하면 **원래대로 되돌립니다.** (자동 설정을 끄려면 화면의 **시스템 프록시 자동 설정** 토글을 끄고, 표시되는 프록시 주소를 복사해 직접 넣으면 됩니다. Firefox는 OS 프록시 대신 자체 설정을 쓰므로 영향을 받지 않습니다.) 창의 닫기(X) 버튼을 누르면 앱이 종료되지 않고 트레이(macOS는 메뉴바) 아이콘으로 최소화되어 보호가 계속 동작합니다 — 완전히 끄려면 트레이 아이콘을 우클릭해 **종료하기**를 선택하세요(아이콘을 클릭하면 창이 다시 열립니다). 새 버전이 나오면 앱이 알려 주고 버튼 하나로 업데이트합니다(아래 [자동 업데이트](#자동-업데이트) 참고).
+**GUI로 쓰려면** 압축을 푼 뒤 `psdns-gui`(macOS는 `psdns.app`)를 실행하세요. 창이 열리면 **보호 시작하기** 버튼 하나면 됩니다 — 기본적으로 이 컴퓨터의 시스템 웹 프록시(http·https)를 psdns로 **자동 설정**하므로 브라우저 프록시를 직접 켤 필요가 없고, 보호를 중지하거나 앱을 종료하면 **원래대로 되돌립니다.** (자동 설정을 끄려면 화면의 **시스템 프록시 자동 설정** 토글을 끄고, 표시되는 프록시 주소를 복사해 직접 넣으면 됩니다. Firefox는 OS 프록시 대신 자체 설정을 쓰므로 영향을 받지 않습니다.) 창의 닫기(X) 버튼을 누르면 앱이 종료되지 않고 트레이(macOS는 메뉴바) 아이콘으로 최소화되어 보호가 계속 동작합니다 — 완전히 끄려면 트레이 아이콘을 우클릭해 **종료하기**를 선택하세요(아이콘을 클릭하면 창이 다시 열립니다). 이미 실행 중인 상태에서 다시 실행하면 새 창이 따로 열리는 대신 기존 창이 앞으로 나옵니다. 새 버전이 나오면 앱이 알려 주고 버튼 하나로 업데이트합니다(아래 [자동 업데이트](#자동-업데이트) 참고).
 
 > **macOS에서 "확인할 수 없습니다" 경고가 뜨면** — 현재 릴리즈는 Apple 공증(notarization) 전이라 Gatekeeper가 실행을 막을 수 있습니다(*"Apple은 'psdns'에 … 악성 코드가 없음을 확인할 수 없습니다"*). 아래 중 하나로 한 번만 허용하면 됩니다:
 > - **`psdns gui` (가장 간단)**: 압축 푼 폴더에서 `./psdns gui` 를 실행하면 같은 폴더의 `psdns.app` 격리를 자동으로 벗기고 GUI를 띄웁니다. 이후에는 앱을 더블클릭해도 바로 열립니다. (터미널에서 실행하는 CLI는 Gatekeeper 검사를 받지 않으므로 격리된 상태에서도 동작합니다.)
@@ -120,12 +120,16 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 
 그 후 OS의 DNS 서버를 `127.0.0.1`로 설정합니다. (DNS 차단만 우회되며, SNI 차단은 우회되지 않습니다.)
 
+> ⚠️ **이 DNS 설정은 psdns가 되돌려 주지 않습니다.** 시스템 프록시 자동 설정(GUI)과 달리 OS DNS 서버는 사용자가 직접 바꾸는 값이라 psdns가 건드리지 않으며, 따라서 종료 시 자동 복원도 되지 않습니다. **psdns를 끄거나 종료하면 DNS 설정을 원래대로(자동/DHCP) 되돌리세요** — `127.0.0.1`을 가리킨 채로 두면 psdns가 실행되지 않는 동안 이름 해석이 전혀 되지 않아 인터넷이 안 됩니다. 이 설정이 필요 없는 프록시 모드(권장)를 쓰면 이런 뒷정리가 없습니다.
+
 ### 공통 플래그
 
 | 플래그 | 기본값 | 설명 |
 |---|---|---|
 | `-doh URL` | `https://1.1.1.1/dns-query` | 업스트림 DoH 엔드포인트 |
 | `-bootstrap IP` | (없음) | DoH 호스트를 해석할 IP[:port] (시스템 DNS 우회) |
+| `-doh-fallbacks URLS` | (없음) | 기본 DoH가 느리거나 실패할 때 시도할 fallback DoH 엔드포인트(콤마 구분) |
+| `-doh-hedge-delay D` | `250ms` | 다음 fallback DoH 질의를 시작하기 전 대기 시간 |
 | `-frag STRATEGY` | `split` | ClientHello 분할 전략: `none` / `split` / `tls-record` |
 | `-frag-delay D` | `0` | 조각 사이 지연 (예: `10ms`) |
 | `-timeout D` | `10s` | dial/질의 타임아웃 |
@@ -142,6 +146,7 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 - **`none`**: 분할 없음 (DNS 차단만 우회, 비교/디버그용).
 
 기본 DoH 엔드포인트는 IP 리터럴 호스트(`1.1.1.1`)라서 DoH 연결 자체에는 SNI가 실리지 않고 DNS 부트스트랩도 필요 없습니다.
+기본 엔드포인트가 막히거나 느린 회선에서는 `-doh-fallbacks https://8.8.8.8/dns-query,https://9.9.9.9/dns-query`처럼 fallback을 지정할 수 있습니다. psdns는 기본 DoH를 먼저 쓰고, `-doh-hedge-delay` 동안 응답이 없거나 실패하면 fallback을 순차적으로 시작해 첫 성공 응답을 사용합니다.
 
 ## 한계 및 고지
 
@@ -149,7 +154,9 @@ psdns resolve -listen 127.0.0.1:5353     # 비특권 포트
 - **IP 기반 차단은 우회하지 못합니다.** 통신사가 도메인이 아니라 목적지 **IP 주소로** 직접 차단하면 psdns로는 뚫리지 않습니다(이름 해석·SNI 단계가 아니라 IP 라우팅 단계의 차단이기 때문입니다).
 - **SNI fragmentation 효과는 통신사 DPI 구현에 의존하므로 모든 사이트/회선에서 보장되지 않습니다.** 안 통하는 경우 ECH(대상 사이트가 지원할 때) 또는 Tor 등 풀터널 방식이 대안입니다.
 - **통신사 정책이 바뀌면 무력화될 수 있습니다.** DPI가 분할된 세그먼트를 재조립한 뒤 SNI를 검사하거나 DoH 엔드포인트(IP) 자체를 차단하기 시작하면 효과가 사라질 수 있습니다. psdns가 철학(순수 유저스페이스·무설치·경량)을 지키며 추가로 적용할 수 있는 우회 전략 로드맵은 [`docs/bypass-roadmap.md`](docs/bypass-roadmap.md)에 정리돼 있습니다.
-- 프록시 모드는 해당 프록시를 사용하도록 설정한 앱(브라우저 등)에만 적용됩니다. GUI의 **시스템 프록시 자동 설정**(기본 켜짐)은 OS 전역 웹 프록시를 psdns로 지정해 OS 프록시를 따르는 앱 전반에 적용되지만, Firefox 등 자체 프록시 설정을 쓰는 앱은 제외됩니다. **macOS에서는 시스템 프록시 변경에 관리자 권한이 필요할 수 있어** 자동 설정이 거부되면 주소를 복사해 직접 넣어야 할 수 있습니다(Windows·Linux는 사용자 권한으로 동작). 비정상 종료로 설정이 남아도 다음 실행 때 자동으로 정리됩니다.
+- 프록시 모드는 해당 프록시를 사용하도록 설정한 앱(브라우저 등)에만 적용됩니다. GUI의 **시스템 프록시 자동 설정**(기본 켜짐)은 OS 전역 웹 프록시를 psdns로 지정해 OS 프록시를 따르는 앱 전반에 적용되지만, Firefox 등 자체 프록시 설정을 쓰는 앱은 제외됩니다. **macOS에서는 시스템 프록시 변경에 관리자 권한이 필요할 수 있어** 자동 설정이 거부되면 주소를 복사해 직접 넣어야 할 수 있습니다(Windows·Linux는 사용자 권한으로 동작). 프록시 설정은 보호를 중지할 때뿐 아니라 앱을 종료하는 모든 경로(트레이 **종료하기**, 앱 내 종료, macOS ⌘Q·Dock 종료, 로그아웃, `kill`)에서 되돌립니다. 강제 종료로 설정이 남아도 다음 실행 때 자동으로 정리되며(그 사이에 프록시 설정을 직접 바꿨다면 psdns는 그 변경을 존중해 되돌리지 않습니다), 정리에 실패하면 앱이 화면에 알려 줍니다. **이미 다른 로컬 프록시(예: AdGuard 등 필터링 앱)가 시스템 프록시로 설정돼 실제로 동작 중이면** psdns는 이를 덮어쓰지 않고 자동 설정을 건너뛰며 안내 메시지를 표시합니다 — 그 앱을 끄거나, 자동 설정을 끄고 psdns 주소를 직접 넣으세요. 설정만 남고 아무것도 응답하지 않는 죽은 프록시(예: 비정상 종료한 이전 psdns의 잔재)는 자동으로 이어받습니다. **psdns를 켰을 때만 안 열리는 사이트가 있으면** GUI 고급 설정의 **프록시 예외 사이트**에 적으세요(예: `mybank.co.kr`) — 그 사이트와 하위 도메인은 psdns를 거치지 않고 평소처럼 접속되며(차단 우회도 적용되지 않음), 목록은 다음 실행에도 유지됩니다.
+- 프록시는 이름을 DoH로 해석하되, DoH가 주소를 주지 못하는 이름(사내망·`.local` 기기·hosts 파일 항목 등)만 OS DNS로 한 번 더 찾습니다. DoH가 답한 이름은 OS DNS를 쓰지 않으므로 통신사 DNS 위조 우회는 그대로입니다.
+- **DNS 기반 광고 차단(AdGuard 등)과 함께 쓸 때:** psdns 프록시를 거친 요청은 이름 해석을 통신사 DNS가 아닌 psdns 내부 DoH로 직접 처리하므로, DNS 단계에서 광고를 막는 도구의 차단이 우회되어 광고가 다시 보일 수 있습니다(psdns의 핵심 동작인 DNS 우회의 부작용). 광고 차단을 유지하려면 `-doh`를 광고 차단 DoH 엔드포인트로 지정하세요(예: `psdns proxy -doh https://dns.adguard-dns.com/dns-query`, GUI는 고급 설정의 DoH 입력란). 그러면 psdns의 해석 자체가 광고 차단 DNS를 거쳐 **통신사 DNS 위조는 우회하면서 광고 도메인은 차단**됩니다.
 - GUI(`psdns-gui`)는 OS 내장 웹뷰를 사용합니다 — Windows는 WebView2(Win10+ 기본 탑재), macOS는 시스템 WebKit, Linux는 WebKitGTK(`libwebkit2gtk`) 런타임이 필요합니다(Linux는 트레이 표시에 `libayatana-appindicator3`도 필요). CLI(`psdns`)는 의존성 없는 단일 정적 바이너리입니다.
 - VPN/우회 기술 자체는 한국에서 합법입니다. 본 도구는 차단 메커니즘의 이해·연구 목적으로 제공되며, **접근 대상 콘텐츠의 적법성과 관련 정책 준수 책임은 사용자에게 있습니다.**
 
@@ -175,14 +182,31 @@ git push origin v1.0.0
 서명·포트·패키징 같은 산출물 전용 문제는 실제 릴리즈에서만 드러나므로, 정식 배포 전에 **프리릴리즈로 실물을 검증**합니다.
 
 1. 수정사항을 `test` 브랜치에 push → `ci.yml`(gofmt·vet·test)이 돕니다.
-2. 프리릴리즈 태그를 push → `release.yml`이 6개 아카이브를 **프리릴리즈**로 게시합니다. 실제 Windows/macOS에서 받아 검증합니다.
+2. 프리릴리즈 태그를 push → `release.yml`이 6개 아카이브를 **프리릴리즈**로 게시하고, 이어서 `verify` 잡이 3개 OS 러너에서 산출물을 내려받아 체크섬과 CLI 동작(버전 일치·프록시 스모크)을 **자동 검증**합니다. GUI 동작은 실제 Windows/macOS에서 받아 확인합니다.
    ```sh
    git tag v1.0.0-rc.1 && git push origin v1.0.0-rc.1
    ```
-3. 통과하면 `test` → `main` 으로 PR·머지합니다.
+3. 통과하면 `test` → `main` 으로 병합합니다 — `release-main.sh` 가 직접 push 하고, main 브랜치 보호가 켜져 있으면 자동으로 PR 생성 → CI 대기 → 머지로 폴백합니다(`--pr` 로 강제 가능).
 4. `main`에서 접미사 없는 정식 태그를 push → 정식 릴리즈됩니다.
 
-1–2단계(테스트 프리릴리즈)는 `scripts/release-test.sh`, 3–4단계(정식 릴리즈)는 `scripts/release-main.sh` 로 자동화돼 있습니다(둘 다 `--dry-run` 으로 계획만 확인 가능). `release-test.sh` 는 현재 변경을 `test` 에 커밋·push 한 뒤 다음 `vX.Y.Z-rc.N` 을 자동 증가시켜 태그하고, `release-main.sh` 는 `test` → `main` 병합·push 후 접미사를 뗀 정식 `vX.Y.Z` 를 태그합니다(버전 생략 시 가장 높은 `-rc` 태그에서 도출). 정식 태그가 게시되면 `release.yml` 이 그 버전의 `-rc` 프리릴리즈/태그를 **자동으로 정리**합니다(로컬 도구 불필요).
+1–2단계(테스트 프리릴리즈)는 `scripts/release-test.sh`, 3–4단계(정식 릴리즈)는 `scripts/release-main.sh` 로 자동화돼 있습니다(둘 다 `--dry-run` 으로 계획만 확인 가능). `release-test.sh` 는 현재 변경을 `test` 에 커밋·push 한 뒤 다음 `vX.Y.Z-rc.N` 을 자동 증가시켜 태그하고, **태그 push 후 릴리즈 런을 끝까지 감시해 실패하면 rc 태그를 자동 회수**합니다 — 다음 시도가 같은 번호를 재사용하므로 고아 태그가 남지 않습니다(`--no-wait` 로 감시 생략, 타임아웃·Ctrl-C 는 회수하지 않음). `release-main.sh` 는 `test` → `main` 병합·push 후 접미사를 뗀 정식 `vX.Y.Z` 를 태그하고 같은 방식으로 런을 감시하지만, **정식 태그는 실패해도 회수하지 않고** 재실행(`gh run rerun`)을 안내합니다(버전 생략 시 가장 높은 `-rc` 태그에서 도출). 릴리즈 본문은 conventional commit 커밋 메시지를 분류해 자동 생성합니다(`scripts/release-notes.sh`). 정식 태그가 게시되면 `release.yml` 이 그 버전의 `-rc` 프리릴리즈/태그를 **자동으로 정리**합니다(`scripts/prune-rc.sh` — 정식 없이 버려진 버전 라인은 로컬에서 `bash scripts/prune-rc.sh --dry-run vX.Y.Z` 로 확인 후 직접 정리할 수 있습니다). 런 감시·회수·정리에는 [GitHub CLI(`gh`)](https://cli.github.com) 로그인이 필요하며, 없으면 릴리즈 스크립트는 해당 단계만 건너뜁니다(push·태그까지는 종전 동작과 동일. 단독 실행하는 `verify-release.sh`·`prune-rc.sh` 는 gh 필수).
+
+**main 브랜치 보호(선택):** PR 필수·CI 통과 필수 보호를 켜려면 아래 ruleset 을 한 번 적용합니다. 이후 `release-main.sh` 는 직접 push 가 거부되면 자동으로 PR 경로를 사용합니다(필수 체크 이름 3종은 `ci.yml` 의 잡 이름과 일치해야 합니다):
+
+```sh
+gh api -X POST repos/vitus9988/psdns/rulesets --input - <<'JSON'
+{ "name": "protect-main", "target": "branch", "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["refs/heads/main"], "exclude": [] } },
+  "rules": [
+    { "type": "pull_request", "parameters": { "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false,
+        "require_last_push_approval": false, "required_review_thread_resolution": false } },
+    { "type": "required_status_checks", "parameters": { "strict_required_status_checks_policy": false,
+        "required_status_checks": [ { "context": "lint + test" },
+          { "context": "gui vet + test (macos-latest)" }, { "context": "gui vet + test (windows-latest)" } ] } },
+    { "type": "deletion" }, { "type": "non_fast_forward" } ] }
+JSON
+```
 
 `-`가 들어간 태그(`v1.0.0-rc.1`)는 자동으로 GitHub 프리릴리즈로 게시되며, `/releases/latest`가 프리릴리즈를 제외하므로(그리고 안정 빌드는 프리릴리즈로 자동 업데이트되지 않으므로) **기존 사용자에게 자동 배포되지 않습니다.** 접미사 없는 `vX.Y.Z`만 모든 사용자에게 자동 업데이트로 제안됩니다.
 

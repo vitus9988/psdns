@@ -7,8 +7,10 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
 
 	"github.com/vitus9988/psdns/internal/gui"
+	"github.com/vitus9988/psdns/internal/relaunch"
 	"github.com/vitus9988/psdns/internal/selfupdate"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -16,24 +18,49 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 )
 
-// version is the release version, injected at build time via
-// -ldflags "-X main.version=...". The self-update logic reads its own copy from
-// internal/selfupdate.Version (also injected); this one is for display.
+// version is a display-only fallback, injected at build time via
+// -ldflags "-X main.version=...". selfupdate.Version is the single source of
+// truth for the running version (update checks compare against it), so
+// displayVersion prefers it; this is used only when self-update is disabled
+// (e.g. a dev build that still wants a richer git-describe string on screen).
 var version = "dev"
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// logFatal is a test seam; in production it is exactly log.Fatal.
+var logFatal = log.Fatal
+
 func main() {
-	// Keep the display version and the self-update version in sync when only one
-	// was injected at build time.
-	if version == "dev" && selfupdate.Version != "dev" {
-		version = selfupdate.Version
+	if err := run(os.Args[1:]); err != nil {
+		logFatal(err)
 	}
+}
 
-	app := gui.NewApp(version)
+// run is main's body behind a testable boundary: the relaunch-helper handoff
+// and version plumbing can run under a test, while the Wails launch itself
+// cannot.
+func run(args []string) error {
+	if handled, err := relaunch.Run(args); handled {
+		return err
+	}
+	return wails.Run(appOptions(gui.NewApp(displayVersion())))
+}
 
-	err := wails.Run(&options.App{
+// displayVersion returns the version to show in the UI. selfupdate.Version is
+// authoritative — it is what update checks compare against — so display follows
+// it whenever it carries a real (injected) version, keeping the shown version
+// from diverging from the one updates act on. main.version is only a fallback
+// for a build that injects a display-only string while leaving self-update off.
+func displayVersion() string {
+	if selfupdate.Version != "dev" {
+		return selfupdate.Version
+	}
+	return version
+}
+
+func appOptions(app *gui.App) *options.App {
+	return &options.App{
 		Title:            "psdns",
 		Width:            480,
 		Height:           860,
@@ -54,8 +81,5 @@ func main() {
 			Appearance:           mac.DefaultAppearance,
 			WebviewIsTransparent: false,
 		},
-	})
-	if err != nil {
-		log.Fatal(err)
 	}
 }

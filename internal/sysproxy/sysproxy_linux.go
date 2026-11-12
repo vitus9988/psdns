@@ -71,6 +71,12 @@ func restore(b Backup) error {
 	return runGsettings(cmds, "시스템 프록시 원복에 실패했어요")
 }
 
+// disable switches the proxy mode off, leaving the host/port keys alone (there
+// is no captured state to put back here). See DisableApplied.
+func disable() error {
+	return runGsettings([][]string{{"set", gnomeProxy, "mode", "none"}}, "시스템 프록시 해제에 실패했어요")
+}
+
 func runGsettings(cmds [][]string, failMsg string) error {
 	var firstErr error
 	for _, args := range cmds {

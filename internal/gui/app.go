@@ -7,15 +7,24 @@ package gui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/vitus9988/psdns/internal/config"
+	"github.com/vitus9988/psdns/internal/relaunch"
 	"github.com/vitus9988/psdns/internal/selfupdate"
 	"github.com/vitus9988/psdns/internal/supervisor"
 	"github.com/vitus9988/psdns/internal/sysproxy"
@@ -34,14 +43,47 @@ const (
 	// updateCheckTimeout bounds both the silent startup update check and the
 	// manual "업데이트 확인" check.
 	updateCheckTimeout = 20 * time.Second
+	// applyTimeout bounds a full ApplyUpdate (metadata + checksums + archive
+	// download + extract + replace). It is generous because the archive is a few
+	// MB and the user may be on a slow link — the old bound was the shared HTTP
+	// client's 15s, which could abort a legitimate multi-MB download mid-stream.
+	applyTimeout = 5 * time.Minute
+)
+
+// Test seams: production code calls these package vars, which unit tests swap
+// for fakes — the real implementations either mutate the OS web proxy
+// (sysproxy.*) or log.Fatal without a live Wails runtime context (wruntime.*),
+// so neither can run under `go test`. Defaults are the real implementations.
+var (
+	sysproxySupported     = sysproxy.Supported
+	sysproxyApply         = sysproxy.Apply
+	sysproxyRestore       = sysproxy.Restore
+	sysproxyDisable       = sysproxy.DisableApplied
+	sysproxyRecoverStale  = sysproxy.RecoverStale
+	sysproxyCurrent       = sysproxy.Current
+	sysproxyAlive         = sysproxy.Alive
+	wailsEventsEmit       = wruntime.EventsEmit
+	wailsWindowHide       = wruntime.WindowHide
+	wailsWindowShow       = wruntime.WindowShow
+	wailsWindowUnminimise = wruntime.WindowUnminimise
+	wailsShow             = wruntime.Show
+	wailsQuit             = wruntime.Quit
 )
 
 // App is the object bound to the Wails frontend.
 type App struct {
-	ctx     context.Context
 	version string
 	sup     *supervisor.Supervisor
 	updater *selfupdate.Checker
+
+	ctxMu sync.Mutex
+	ctx   context.Context
+	// bgCancel cancels the in-flight startup update check so Shutdown can stop
+	// it rather than let it run (and emit) against a torn-down context.
+	bgCancel context.CancelFunc
+	// startupNotice holds a message raised before the frontend could listen for
+	// events; the UI collects it via StartupNotice during init. Guarded by ctxMu.
+	startupNotice string
 
 	// quitting distinguishes a real quit (tray "종료하기" / the in-app button,
 	// which route through Quit) from the window's close button: BeforeClose
@@ -51,9 +93,6 @@ type App struct {
 	// hook); set by startTray, consumed by stopTray. Nil on Windows, which runs
 	// systray.Run and tears down via systray.Quit instead.
 	trayEnd func()
-	// bgCancel cancels the in-flight startup update check so Shutdown can stop
-	// it rather than let it run (and emit) against a torn-down context.
-	bgCancel context.CancelFunc
 	// sysproxyMu serializes the apply/restore sequence and guards sysproxyOn, so a
 	// quick Start/Stop pair (Wails may dispatch bound calls on separate goroutines)
 	// cannot interleave the backup capture/write/restore/delete on the shared file.
@@ -62,30 +101,72 @@ type App struct {
 	// restore is a no-op unless we changed it. It is set before Apply touches the
 	// OS, so even a partial apply failure is still undone by this session's Stop.
 	sysproxyOn bool
+
+	// instanceLock is the held single-instance lock file (see instancelock.go);
+	// nil when the guard was skipped. secondInstance records that this process
+	// lost the guard, so Start refuses even if the exit is stubbed out.
+	instanceLock   *os.File
+	secondInstance atomic.Bool
+	// signalOnce keeps the SIGINT/SIGTERM handler to one installation, since
+	// Startup is the only caller but tests exercise it directly too.
+	signalOnce sync.Once
 }
 
 // NewApp builds the App. version is the GUI build version shown in the UI.
 func NewApp(version string) *App {
+	cfg := config.Default()
+	cfg.ProxyBypass = loadBypass()
 	return &App{
 		version: version,
-		sup:     supervisor.New(config.Default()),
-		updater: selfupdate.NewChecker(&http.Client{Timeout: 15 * time.Second}),
+		sup:     supervisor.New(cfg),
+		// No fixed Client.Timeout: it would cap the whole request including the
+		// archive body read, which can legitimately exceed it on a slow link.
+		// Each call sets its own context deadline instead (updateCheckTimeout for
+		// checks, applyTimeout for ApplyUpdate); the transport timeouts below still
+		// catch a dead connection or a server that never sends headers.
+		updater: selfupdate.NewChecker(&http.Client{
+			Transport: &http.Transport{
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 15 * time.Second,
+			},
+		}),
 	}
 }
 
 // Startup is wired to options.App.OnStartup: it captures the Wails runtime
 // context and starts a one-shot background update check.
 func (a *App) Startup(ctx context.Context) {
-	a.ctx = ctx
+	a.setRuntimeContext(ctx)
+	// Before anything else, and specifically before RecoverStale: a duplicate
+	// launch that got past Wails's own SingleInstanceLock (see instancelock.go)
+	// must not clean up "stale" state that a live instance still owns, and must
+	// not go on to fight it for :53.
+	if !a.acquireInstanceLock() {
+		a.secondInstance.Store(true)
+		a.refuseSecondInstance()
+		return
+	}
+	a.installSignalHandler()
 	a.startTray()
 	// A previous run may have crashed or been force-killed with the OS proxy
 	// still pointed at us; clean that up first so a fresh Start snapshots the
-	// real prior state. No-op on a clean start (no backup left behind).
-	if _, err := sysproxy.RecoverStale(); err != nil {
+	// real prior state. No-op on a clean start (no backup left behind). Under
+	// sysproxyMu so it cannot interleave with an early Start's apply on the
+	// shared backup file.
+	a.sysproxyMu.Lock()
+	_, err := sysproxyRecoverStale()
+	a.sysproxyMu.Unlock()
+	if err != nil {
 		log.Printf("gui: stale system-proxy cleanup failed: %v", err)
+		// A failure here means a previous run's OS proxy may still be in place —
+		// the user's network may be routed through a proxy that no longer exists.
+		// Park it for the frontend to pick up rather than emitting: at Startup the
+		// frontend has not yet subscribed, so an event would be lost.
+		a.setStartupNotice("이전 실행이 남긴 시스템 프록시 설정을 정리하지 못했어요. " +
+			"인터넷이 안 되면 OS 네트워크 설정에서 프록시를 꺼 주세요.")
 	}
 	bgCtx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
-	a.bgCancel = cancel
+	a.setBackgroundCancel(cancel)
 	go a.backgroundCheck(bgCtx)
 }
 
@@ -96,7 +177,7 @@ func (a *App) BeforeClose(ctx context.Context) (prevent bool) {
 	if !a.shouldPreventClose() {
 		return false
 	}
-	wruntime.WindowHide(ctx)
+	wailsWindowHide(ctx)
 	return true
 }
 
@@ -112,28 +193,39 @@ func (a *App) shouldPreventClose() bool {
 // the tray and any running servers, and drop the runtime context so a late
 // background goroutine cannot emit against it.
 func (a *App) Shutdown(ctx context.Context) {
-	if a.bgCancel != nil {
-		a.bgCancel()
-	}
+	a.cancelBackgroundCheck()
 	// Restore the OS proxy on every real exit (tray quit, window close, normal
 	// OnShutdown). A force-kill skips this; the next Startup's RecoverStale
 	// covers that — the two are a pair.
 	a.restoreSystemProxy()
 	a.stopTray()
 	if a.sup != nil {
-		_ = a.sup.Stop()
+		if err := a.sup.Stop(); err != nil {
+			log.Printf("gui: server shutdown: %v", err)
+		}
 	}
-	a.ctx = nil
+	a.releaseInstanceLock()
+	a.setRuntimeContext(nil)
 }
 
 // OnSecondInstance brings the existing window to the front when the user
 // launches the app again (wired to SingleInstanceLock).
 func (a *App) OnSecondInstance(_ options.SecondInstanceData) {
-	if a.ctx == nil {
-		return
+	if ctx := a.runtimeContext(); ctx != nil {
+		a.revealWindow(ctx)
 	}
-	wruntime.WindowUnminimise(a.ctx)
-	wruntime.Show(a.ctx)
+}
+
+// revealWindow brings the window back after a hide-to-tray or a minimise. All
+// three calls are needed and must run together: WindowShow undoes the
+// BeforeClose WindowHide, WindowUnminimise undoes a minimise, and Show raises
+// and focuses it — a window hidden by WindowHide will not reappear on
+// Unminimise+Show alone. Shared by the tray click (showWindow) and
+// OnSecondInstance so neither path can drift from the full sequence.
+func (a *App) revealWindow(ctx context.Context) {
+	wailsWindowShow(ctx)
+	wailsWindowUnminimise(ctx)
+	wailsShow(ctx)
 }
 
 func (a *App) backgroundCheck(ctx context.Context) {
@@ -141,8 +233,8 @@ func (a *App) backgroundCheck(ctx context.Context) {
 	if err != nil || !res.Newer {
 		return // offline, rate-limited, cancelled, or already up to date: stay quiet
 	}
-	if a.ctx != nil {
-		wruntime.EventsEmit(a.ctx, "update:available", res)
+	if ctx := a.runtimeContext(); ctx != nil {
+		wailsEventsEmit(ctx, "update:available", res)
 	}
 }
 
@@ -154,23 +246,64 @@ func (a *App) GetStatus() supervisor.State { return a.sup.Status() }
 
 // Start brings up the servers for mode ("proxy"|"resolve"|"run"). On a caller
 // error (already running, invalid mode, bad config) the promise rejects with a
-// friendly message; bind failures instead arrive in the resolved State's
-// Listeners[].Err.
+// friendly message. A partial bind failure resolves normally and arrives in the
+// State's Listeners[].Err, so the UI can report "some listeners failed" while
+// the rest keep working — but when *nothing* came up the servers are stopped
+// again and the error is returned, so the UI does not show a running session
+// that is bound to nothing (which is how a duplicate instance fighting over :53
+// looked like a successful start).
 func (a *App) Start(mode string) (supervisor.State, error) {
+	if a.secondInstance.Load() {
+		return a.sup.Status(), errors.New("이미 다른 psdns 가 실행 중이에요. 그 창에서 켜 주세요.")
+	}
 	if err := a.sup.Start(supervisor.Mode(mode)); err != nil {
 		return a.sup.Status(), friendlyStartErr(err)
 	}
 	st := a.sup.WaitSettled(settleDelay)
+	if msg, allFailed := allListenersFailed(st); allFailed {
+		_ = a.sup.Stop()
+		return a.sup.Status(), errors.New(msg)
+	}
 	a.maybeApplySystemProxy(st)
 	return st, nil
 }
 
+// allListenersFailed reports whether every listener of a just-started session is
+// down, and returns the reasons (already friendly, from classifyBindErr) to show.
+// A session with no listeners at all is not treated as failed — that is not a
+// state Start produces, and guessing would turn an unknown into a false error.
+func allListenersFailed(st supervisor.State) (string, bool) {
+	if len(st.Listeners) == 0 {
+		return "", false
+	}
+	var msgs []string
+	for _, l := range st.Listeners {
+		if l.Up {
+			return "", false
+		}
+		if l.Err != "" {
+			msgs = append(msgs, l.Err)
+		}
+	}
+	if len(msgs) == 0 {
+		msgs = append(msgs, "서버를 시작하지 못했어요.")
+	}
+	return strings.Join(msgs, "\n"), true
+}
+
 // Stop tears down all servers. The system proxy is restored before the servers
-// go down so the OS is never left pointing at a closing listener.
+// go down so the OS is never left pointing at a closing listener. The restore
+// and the server teardown happen under sysproxyMu so they cannot interleave with
+// a maybeApplySystemProxy from a racing Start (Wails may dispatch Start and Stop
+// on separate goroutines): either the apply runs first and this restore undoes
+// it, or this teardown runs first and the apply sees Running==false and skips.
 func (a *App) Stop() (supervisor.State, error) {
-	a.restoreSystemProxy()
-	if err := a.sup.Stop(); err != nil {
-		return a.sup.Status(), err
+	a.sysproxyMu.Lock()
+	a.restoreSystemProxyLocked()
+	err := a.sup.Stop()
+	a.sysproxyMu.Unlock()
+	if err != nil {
+		return a.sup.Status(), friendlyStopErr(err)
 	}
 	return a.sup.Status(), nil
 }
@@ -184,6 +317,9 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 	if !a.sup.Config().SetSystemProxy {
 		return
 	}
+	if !sysproxySupported() {
+		return // no OS automation on this platform; the UI hides the toggle, so stay silent
+	}
 	var httpAddr string
 	for _, l := range st.Listeners {
 		if l.Kind == supervisor.KindHTTP && l.Up {
@@ -194,18 +330,54 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 	if httpAddr == "" {
 		return // resolve mode, or the HTTP listener failed to bind
 	}
-	s, err := sysproxy.FromAddr(httpAddr, sysproxy.DefaultBypass())
+	s, err := sysproxy.FromAddr(httpAddr, sysproxy.BypassWith(a.sup.Config().ProxyBypass))
 	if err != nil {
 		return
 	}
 	a.sysproxyMu.Lock()
 	defer a.sysproxyMu.Unlock()
+	// Guard the Start/Stop race: Wails may dispatch a Stop on another goroutine
+	// during Start's settle delay. Stop takes sysproxyMu across its server
+	// teardown, so if it already ran, the servers are down by now — applying would
+	// point the OS proxy at a dead listener that this session would never restore
+	// (Stop's restore already ran and found nothing owed). Re-check under the lock.
+	if !a.sup.Status().Running {
+		return
+	}
+	// Don't silently clobber another local filtering proxy (e.g. AdGuard): if the
+	// OS already routes web traffic through a *different* loopback proxy that is
+	// actually accepting connections, applying would route around its filtering
+	// (its ad-blocking would stop working while psdns is on), so warn and skip.
+	// No backup is written and sysproxyOn stays false, so Stop/RecoverStale
+	// remain no-ops (no dead-proxy risk). A dead loopback entry is not worth
+	// protecting — it is the leftover of a crashed run (often our own, after a
+	// port fallback moved us off its port) and is taken over; Apply's capture
+	// hygiene keeps that dead state out of the backup. A detection error is
+	// fail-open — Apply's own capture would surface the same failure. The user
+	// can turn off that app or the auto-set toggle and set psdns by hand.
+	if cur, derr := sysproxyCurrent(); derr == nil && cur.ConflictsWith(s.Host, s.Port) &&
+		sysproxyAlive(cur.Host, cur.Port, sysproxy.ProbeTimeout) {
+		a.emitSysProxy("conflict", fmt.Sprintf(
+			"다른 로컬 프록시(%s)가 시스템 프록시로 설정돼 있어 자동 설정을 건너뛰었어요. "+
+				"그 앱(예: AdGuard)을 끄거나, '시스템 프록시 자동 설정'을 끄고 아래 주소를 직접 넣어 주세요.",
+			net.JoinHostPort(cur.Host, strconv.Itoa(cur.Port))))
+		return
+	}
 	// Mark the restore as owed before Apply touches the OS: Apply writes its
 	// backup first, so a partial apply failure (e.g. macOS admin refusal mid-way)
 	// must still be undone by this session's Stop/Shutdown, not left only for the
 	// next launch's RecoverStale.
 	a.sysproxyOn = true
-	if err := sysproxy.Apply(s); err != nil {
+	touched, err := sysproxyApply(s)
+	if !touched {
+		// Apply gave up before changing anything (it could not snapshot or save the
+		// previous state), so this session owes no restore. Clearing the flag again
+		// matters: with it set and no backup on disk, the restore path would fall
+		// through to DisableApplied and switch off whatever proxy the user already
+		// had — one we never touched.
+		a.sysproxyOn = false
+	}
+	if err != nil {
 		a.emitSysProxy("error", "시스템 프록시 자동 설정에 실패했어요. 아래 주소를 복사해 브라우저에 직접 넣어 주세요.")
 		return
 	}
@@ -219,22 +391,69 @@ func (a *App) maybeApplySystemProxy(st supervisor.State) {
 func (a *App) restoreSystemProxy() {
 	a.sysproxyMu.Lock()
 	defer a.sysproxyMu.Unlock()
+	a.restoreSystemProxyLocked()
+}
+
+// restoreSystemProxyLocked is the body of restoreSystemProxy; the caller must
+// already hold sysproxyMu. Stop calls this directly so the restore and the
+// server teardown stay in one critical section (see Stop).
+func (a *App) restoreSystemProxyLocked() {
 	if !a.sysproxyOn {
 		return
 	}
-	if err := sysproxy.Restore(); err != nil {
+	restored, err := sysproxyRestore()
+	if err != nil {
 		a.emitSysProxy("error", "시스템 프록시를 원래대로 되돌리지 못했어요. 네트워크 설정을 확인해 주세요.")
+		return
+	}
+	if !restored {
+		// We applied (sysproxyOn) but the snapshot is gone — deleted as corrupt,
+		// removed by a cleanup tool, or consumed by a duplicate instance. Treating
+		// that as success is what used to leave the OS pointed at a listener that
+		// is about to close, with no backup left for the next launch to recover
+		// from, i.e. an internet outage the user has to fix by hand. We cannot
+		// reproduce their previous setting, but we can stop routing through us.
+		if derr := sysproxyDisable(); derr != nil {
+			a.emitSysProxy("error", "시스템 프록시 원복 정보가 사라져 자동 복원에 실패했어요. OS 설정에서 프록시를 직접 꺼 주세요.")
+			return
+		}
+		a.sysproxyOn = false
+		a.emitSysProxy("restored", "원복 정보가 사라져 시스템 프록시를 껐어요. 이전에 쓰던 프록시가 있었다면 다시 지정해 주세요.")
 		return
 	}
 	a.sysproxyOn = false
 	a.emitSysProxy("restored", "시스템 프록시를 원래대로 되돌렸어요")
 }
 
+// StartupNotice returns a message about something that went wrong before the UI
+// existed (currently: stale system-proxy cleanup failed), and clears it so it is
+// shown once. The frontend polls this during init instead of listening for an
+// event, because Startup runs before the frontend subscribes and an event there
+// would go nowhere.
+func (a *App) StartupNotice() string {
+	a.ctxMu.Lock()
+	defer a.ctxMu.Unlock()
+	n := a.startupNotice
+	a.startupNotice = ""
+	return n
+}
+
+func (a *App) setStartupNotice(msg string) {
+	a.ctxMu.Lock()
+	a.startupNotice = msg
+	a.ctxMu.Unlock()
+}
+
+// SystemProxySupported reports whether OS web-proxy automation is available on
+// this platform, so the frontend can hide or disable the auto-set toggle where
+// it can never take effect (unsupported OS, or Linux without a graphical session).
+func (a *App) SystemProxySupported() bool { return sysproxySupported() }
+
 // emitSysProxy sends a sysproxy:* event (a toast) to the frontend. No-op when the
 // runtime context is gone (e.g. mid-shutdown).
 func (a *App) emitSysProxy(kind, msg string) {
-	if a.ctx != nil {
-		wruntime.EventsEmit(a.ctx, "sysproxy:"+kind, msg)
+	if ctx := a.runtimeContext(); ctx != nil {
+		wailsEventsEmit(ctx, "sysproxy:"+kind, msg)
 	}
 }
 
@@ -247,13 +466,69 @@ func (a *App) SetConfig(u uiconfig.Config) (uiconfig.SetResult, error) {
 	if err != nil {
 		return uiconfig.SetResult{}, err
 	}
+	prevBypass := a.sup.Config().ProxyBypass
 	if err := a.sup.SetConfig(c); err != nil {
 		if errors.Is(err, supervisor.ErrAlreadyRunning) {
 			return uiconfig.SetResult{}, errors.New("실행 중에는 설정을 바꿀 수 없어요. 먼저 중지한 뒤 바꿔 주세요.")
 		}
 		return uiconfig.SetResult{}, err
 	}
+	// Write only on a change, so a plain settings save never touches the file.
+	if !slices.Equal(prevBypass, c.ProxyBypass) {
+		if err := saveBypass(c.ProxyBypass); err != nil {
+			warns = append(warns, "프록시 예외 사이트를 저장하지 못했어요. 다음 실행 때는 다시 입력해야 해요.")
+		}
+	}
 	return uiconfig.SetResult{Config: uiconfig.FromConfig(a.sup.Config()), Warnings: warns}, nil
+}
+
+// bypassFile is <UserConfigDir>/psdns/proxy-bypass.txt, one host per line. The
+// exception list is the only setting persisted across launches: re-entering it
+// every launch would defeat it, while persisting every setting would freeze
+// today's defaults (e.g. the DoH endpoint) into the user's file for good.
+func bypassFile() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "psdns", "proxy-bypass.txt"), nil
+}
+
+// loadBypass returns the saved exception list. A missing, unreadable or invalid
+// file (it is re-validated: the hosts go verbatim into OS settings) yields none.
+func loadBypass() []string {
+	p, err := bypassFile()
+	if err != nil {
+		return nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	hosts, err := uiconfig.ParseBypass(string(b))
+	if err != nil {
+		log.Printf("gui: ignoring invalid %s: %v", p, err)
+		return nil
+	}
+	return hosts
+}
+
+// saveBypass persists hosts for the next launch; an empty list removes the file.
+func saveBypass(hosts []string) error {
+	p, err := bypassFile()
+	if err != nil {
+		return err
+	}
+	if len(hosts) == 0 {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(p, []byte(strings.Join(hosts, "\n")+"\n"), 0o600)
 }
 
 // CheckUpdate forces a fresh update check (the manual "업데이트 확인" button).
@@ -266,9 +541,11 @@ func (a *App) CheckUpdate() (selfupdate.CheckResult, error) {
 // ApplyUpdate downloads, verifies, and installs the newest release, emitting
 // "update:progress" events, then restarts the app.
 func (a *App) ApplyUpdate() error {
-	err := a.updater.Apply(context.Background(), func(stage selfupdate.Stage, pct float64) {
-		if a.ctx != nil {
-			wruntime.EventsEmit(a.ctx, "update:progress", map[string]any{
+	ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
+	defer cancel()
+	err := a.updater.Apply(ctx, func(stage selfupdate.Stage, pct float64) {
+		if ctx := a.runtimeContext(); ctx != nil {
+			wailsEventsEmit(ctx, "update:progress", map[string]any{
 				"stage": string(stage), "pct": pct,
 			})
 		}
@@ -287,13 +564,13 @@ func (a *App) ApplyUpdate() error {
 func (a *App) restart() {
 	exe, err := os.Executable()
 	if err == nil {
-		cmd := exec.Command(exe, os.Args[1:]...)
+		cmd := exec.Command(exe, relaunch.Args(os.Getpid(), os.Args[1:])...)
 		cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
 		err = cmd.Start()
 	}
 	if err != nil {
-		if a.ctx != nil {
-			wruntime.EventsEmit(a.ctx, "update:error",
+		if ctx := a.runtimeContext(); ctx != nil {
+			wailsEventsEmit(ctx, "update:error",
 				"업데이트는 적용됐지만 자동 재시작에 실패했어요. 앱을 직접 다시 실행해 주세요.")
 		}
 		return
@@ -302,15 +579,89 @@ func (a *App) restart() {
 	a.Quit()
 }
 
+// installSignalHandler arranges for a SIGINT/SIGTERM to restore the OS proxy and
+// release the ports before the process dies. Wails installs no signal handler of
+// its own, so without this a `kill`, a Ctrl-C on a terminal launch, or a Linux
+// session logout killed the app with the OS web proxy still pointed at us —
+// leaving the user's network settings changed until a later launch's
+// RecoverStale. On Windows SIGTERM is never delivered to a GUI process; the
+// delegate hook (macOS) and RecoverStale (everywhere) remain the backstops.
+func (a *App) installSignalHandler() {
+	a.signalOnce.Do(func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		go a.awaitTerminationSignal(ch)
+	})
+}
+
+// awaitTerminationSignal is installSignalHandler's body, split out so a test can
+// deliver a signal without one. It runs on its own goroutine and never touches
+// Wails, so it cannot interfere with the native main loop; the OS state is
+// already put back by the time the process exits.
+func (a *App) awaitTerminationSignal(ch <-chan os.Signal) {
+	sig, ok := <-ch
+	if !ok {
+		return
+	}
+	log.Printf("gui: %v received, restoring system settings before exit", sig)
+	a.shutdownForTermination()
+	exitFn(0)
+}
+
+// shutdownForTermination undoes everything this process owes the OS when it is
+// about to die without Wails's OnShutdown running: a macOS ⌘Q / Dock quit /
+// logout (see tray_darwin.go — systray replaces Wails's app delegate, so those
+// paths bypass OnShutdown entirely) or a SIGINT/SIGTERM. It is deliberately
+// Wails-free and idempotent: sysproxyOn makes the restore run exactly once, and
+// a second Stop just reports ErrNotRunning. quitting is set so a close event
+// racing us cannot be turned into a hide-to-tray.
+func (a *App) shutdownForTermination() {
+	a.quitting.Store(true)
+	a.restoreSystemProxy()
+	if a.sup != nil {
+		_ = a.sup.Stop()
+	}
+	a.releaseInstanceLock()
+}
+
 // Quit stops servers and closes the app. Setting quitting first tells
 // BeforeClose to allow the close instead of hiding to the tray.
 func (a *App) Quit() {
 	a.quitting.Store(true)
+	a.restoreSystemProxy()
 	if a.sup != nil {
 		_ = a.sup.Stop()
 	}
-	if a.ctx != nil {
-		wruntime.Quit(a.ctx)
+	if ctx := a.runtimeContext(); ctx != nil {
+		wailsQuit(ctx)
+	}
+}
+
+func (a *App) setRuntimeContext(ctx context.Context) {
+	a.ctxMu.Lock()
+	a.ctx = ctx
+	a.ctxMu.Unlock()
+}
+
+func (a *App) runtimeContext() context.Context {
+	a.ctxMu.Lock()
+	defer a.ctxMu.Unlock()
+	return a.ctx
+}
+
+func (a *App) setBackgroundCancel(cancel context.CancelFunc) {
+	a.ctxMu.Lock()
+	a.bgCancel = cancel
+	a.ctxMu.Unlock()
+}
+
+func (a *App) cancelBackgroundCheck() {
+	a.ctxMu.Lock()
+	cancel := a.bgCancel
+	a.bgCancel = nil
+	a.ctxMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -323,4 +674,14 @@ func friendlyStartErr(err error) error {
 	default:
 		return err
 	}
+}
+
+// friendlyStopErr keeps the supervisor's internal wording out of the UI: a stray
+// Stop (double click, or a Start that already rolled itself back) would otherwise
+// surface the raw "supervisor: not running".
+func friendlyStopErr(err error) error {
+	if errors.Is(err, supervisor.ErrNotRunning) {
+		return errors.New("이미 꺼져 있어요.")
+	}
+	return err
 }
